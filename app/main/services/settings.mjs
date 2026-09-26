@@ -13,6 +13,9 @@ import path from 'node:path';
 /** 导出时自动建的项目文件夹名。成片、manifest、预览图都收在里面。 */
 export const EXPORT_SUBDIR = '像素拼图导出';
 
+/** 切回原图时自动建的文件夹名（和导出目录平级，别把交付的原图和画布混在一起）。 */
+export const RECOVER_SUBDIR = '切回原图';
+
 export function defaultSettings(pictures) {
   return {
     // 用户选的**父目录**；真正的导出目录 = <exportParent>/像素拼图导出
@@ -69,7 +72,12 @@ export function exportDirOf(settings) {
   return path.join(settings.exportParent, EXPORT_SUBDIR);
 }
 
-/** 切回原图的输出目录：用户没单独设过就跟导出目录走 */
+/**
+ * 切回原图的输出目录。
+ * 默认 = 导出目录**旁边**自动建一个「切回原图」——
+ * 用户不用选任何东西，切回来的原图就有地方放；两边平级，画布和交付的原图不会混。
+ */
 export function recoverDirOf(settings) {
-  return settings?.recoverDir || exportDirOf(settings);
+  if (settings?.recoverDir) return settings.recoverDir;
+  return path.join(settings.exportParent, RECOVER_SUBDIR);
 }

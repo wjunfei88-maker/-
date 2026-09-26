@@ -176,7 +176,6 @@ export default function Stage({
             从访达拖入，或按 <span className="kbd">⌘O</span> 选择。
             软件会按像素蛋糕 12000px 的单边上限自动排版，全程 1:1 不缩放。
           </p>
-          <button className="btn primary" onClick={() => onDropFiles(null)}>选择照片…</button>
         </div>
       ) : (
         <div

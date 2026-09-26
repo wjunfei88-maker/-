@@ -11,7 +11,8 @@ import { planGroups, packCanvas, CANVAS_LIMIT, capacityHint, capacityExplain } f
 import { renderCanvas, makeBaseName } from './services/export.mjs';
 import { exportConcurrency, splitPlan, createLimiter } from './services/pool.mjs';
 import { splitCanvas } from './services/split.mjs';
-import { findManifestFor, planRecover } from './services/recover.mjs';
+import { findManifestFor, planRecover, scanDirForCanvases } from './services/recover.mjs';
+import { pruneSession, sessionPayload } from './services/session.mjs';
 import {
   EXPORT_SUBDIR as SETTINGS_SUBDIR, normalizeSettings, cleanPatch, exportDirOf, recoverDirOf,
 } from './services/settings.mjs';
@@ -473,15 +474,54 @@ ipcMain.handle('library:forget', (_e, id) => {
   return lib;
 });
 
+/** 一键清空历史批次。只动 library.json，不删用户磁盘上的成片。 */
+ipcMain.handle('library:clear', () => {
+  writeLibrary({ batches: [] });
+  return { batches: [] };
+});
+
+/**
+ * 扫目录找成片。
+ * 不传目录就扫当前的导出目录 —— 这是常规路径：用户刚导出的成片就在那儿，
+ * 不该让他手动一个个挑。手选文件只留给特殊情况（换过目录、分批导过）。
+ */
+ipcMain.handle('recover:scan', (_e, dir) => {
+  const target = dir || exportDirOf(readSettings());
+  return { dir: target, ...scanDirForCanvases(target) };
+});
+
 /** 从一个文件反查它的 sidecar manifest（用户直接把修完的图拖进来时用） */
-ipcMain.handle('manifest:findFor', (_e, file) => findManifestFor(file));
+ipcMain.handle('manifest:findFor', (_e, file, opts) => findManifestFor(file, opts));
+
+// ─────────────────────── 会话：退出重进别丢工作 ───────────────────────
+// 用户的原话是「退出重进就所有东西都消失了」。导入 + 排版是花时间的事，
+// 顺手存在本地，下次打开自动接上（PC_DEMO 演示模式除外）。
+function sessionFile() { return path.join(app.getPath('userData'), 'session.json'); }
+
+ipcMain.handle('session:save', (_e, data = {}) => {
+  try {
+    fs.writeFileSync(sessionFile(), JSON.stringify(sessionPayload(data)));
+  } catch { /* 存不下就算了，不能因为会话存盘失败挡住用户干活 */ }
+  return true;
+});
+
+ipcMain.handle('session:load', () => {
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(sessionFile(), 'utf8')); } catch { return null; }
+  return pruneSession(raw, { exists: (p) => fs.existsSync(p) });
+});
+
+ipcMain.handle('session:clear', () => {
+  try { fs.unlinkSync(sessionFile()); } catch { /* 本来就没有 */ }
+  return true;
+});
 
 /**
  * 批量切回 · 第一步：先只做「配对」，不动像素。
  * 让用户看清楚哪几个文件能切、各能切出几张、哪个配不上记录，再决定要不要全切。
  * 配不上就**不动**，绝不猜 —— 猜错会把别人的画布切坏。
  */
-ipcMain.handle('recover:plan', (_e, { files = [] } = {}) => planRecover(files));
+ipcMain.handle('recover:plan', (_e, { files = [], exactOnly = false } = {}) => planRecover(files, { exactOnly }));
 
 /**
  * 批量切回 · 第二步：一次把所有画布都切回原图并搬回 EXIF。

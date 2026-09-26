@@ -111,22 +111,89 @@ export default function App() {
   useEffect(() => pc.info().then((i) => {
     // 导出位置 = 用户选的父目录 + 固定的「像素拼图导出」子文件夹（主进程算好给过来的）
     setExp((e) => ({ ...e, outDir: i.exportDir || i.home, subdir: i.subdir || '像素拼图导出' }));
-    setRec((r) => ({ ...r, outDir: i.settings?.recoverDir || i.exportDir || i.home }));
+    // 切回原图的输出目录也在主进程算好（默认 = 导出父目录旁边的「切回原图」）
+    setRec((r) => ({ ...r, outDir: i.recoverDir || i.settings?.recoverDir || i.home }));
     setSys(i.plan ?? null);
     if (i.demoFiles?.length && !bootRef.current) {
       bootRef.current = true;
       setTimeout(() => demoBoot(i.demoFiles), 120);
+      return;
     }
+    // 没给演示目录就恢复上次的会话 —— 用户抱怨过「退出重进就所有东西都消失了」
+    pc.loadSession().then((ses) => {
+      if (!ses?.images?.length || bootRef.current) return;
+      bootRef.current = true;
+      setImages(ses.images);
+      setAllowRotate(!!ses.allowRotate);
+      if (ses.gutter != null) setGutter(ses.gutter);
+      if (ses.name) setExp((e) => ({ ...e, name: ses.name }));
+      if (ses.plan?.canvases?.length) {
+        setPlan(ses.plan);
+        setPlanIndex(ses.planIndex ?? 0);
+        const total = ses.plan.canvases.reduce((n, c) => n + c.placed.length, 0);
+        toast('接着上次继续', `上次那 ${ses.images.length} 张照片和排版还在（共 ${ses.plan.canvases.length} 张画布 / ${total} 张已排）。`, 'ok', 7000);
+      } else {
+        setMessage(`已恢复 ${ses.images.length} 张照片（还没有排版）`);
+      }
+    }).catch((e) => {
+      // 不要静默吞：会话恢复出错要能在控制台看见（曾经因为静默 catch 排查了很久）
+      console.error('[session] 恢复失败', e);
+      setMessage('上次的进度没能恢复（照片还在，重新导入即可）');
+    });
   }), []);
 
   useEffect(() => pc.library().then(setLibrary), []);
+  // 会话自动存盘（防抖 800ms）：退出重进能接着干。
+  // 只存轻量状态（图片引用 + 排版 + 当前画布），不存像素。
+  useEffect(() => {
+    if (bootRef.current !== true) return undefined;
+    const t = setTimeout(() => {
+      pc.saveSession({ images, plan, planIndex, allowRotate, gutter, name: exp.name }).catch(() => {});
+    }, 800);
+    return () => clearTimeout(t);
+  }, [images, plan, planIndex, allowRotate, gutter, exp.name]);
   useEffect(() => pc.onProgress((p) => setProgress(p)), []);
+
+  const loadReturned = useCallback(async (files) => {
+    if (!files || !files.length) return;
+    const p = await pc.recoverPlan(files);
+    setRec((v) => ({ ...v, files, plan: p }));
+    const bad = p.total - p.okCount;
+    if (!p.okCount) {
+      toast('没找到合成记录', '选中的文件旁边要有导出时生成的 .manifest.json', 'err', 9000);
+    } else if (bad) {
+      toast(`配对成功 ${p.okCount} / ${p.total}`,
+        `有 ${bad} 个文件旁边缺 .manifest.json，会被跳过。可切回 ${p.imageCount} 张原图。`, 'err', 9000);
+    } else {
+      toast(`已配对 ${p.okCount} 张画布`,
+        `共可切回 ${p.imageCount} 张原图${p.okCount > 1 ? '，点一下全部切回' : ''}。`, 'ok');
+    }
+  }, [toast]);
 
   // ── 导入 ──
   const importList = useCallback(async (list) => {
     setBusy(true); setMessage('正在读取照片…');
     try {
-      const got = await pc.importImages(list);
+      // 先看看这些文件里有没有「之前导出的画布」——它们旁边躺着 .manifest.json。
+      // 有的话不该当成照片导进来，而应该走「切回原图」。
+      // 用 exactOnly：只有同名 manifest 才算，免得把名字沾边的普通照片误认成画布。
+      let canvasFiles = [];
+      try {
+        const peek = await pc.recoverPlan(list, { exactOnly: true });
+        canvasFiles = (peek?.rows ?? []).filter((r) => r.ok).map((r) => r.file);
+      } catch { /* 探测失败就按普通照片走，不影响导入 */ }
+
+      const normal = list.filter((f) => !canvasFiles.includes(f));
+      if (canvasFiles.length) {
+        await loadReturned(canvasFiles);
+        toast('认出来了：这是导出的画布',
+          `它旁边有 .manifest.json，已经按「切回原图」配好对（${canvasFiles.length} 张画布）。`,
+          'ok', 9000);
+        if (!normal.length) { setMessage('等你的成片'); return []; }
+      }
+      if (!normal.length) return [];
+
+      const got = await pc.importImages(normal);
       const good = got.filter((g) => !g.error);
       const bad = got.filter((g) => g.error);
       setImages((prev) => {
@@ -140,7 +207,7 @@ export default function App() {
       toast('导入失败', e.message, 'err');
       return [];
     } finally { setBusy(false); setProgress(null); }
-  }, [toast]);
+  }, [toast, loadReturned]);
 
   const addImages = useCallback(async (paths) => {
     const list = paths?.length ? paths : await pc.pickImages();
@@ -375,7 +442,7 @@ export default function App() {
       setLibrary(await pc.library());
       const totalMB = r.done.reduce((s, d) => s + d.bytes, 0) / 1024 / 1024;
       toast(`已导出 ${r.done.length} 张画布`,
-        `${r.done.length} 个 TIFF + manifest 已写到 ${exp.outDir}\n共 ${totalMB.toFixed(0)}MB\n\n修完回来点「切回原图」→「选整个文件夹」，一次全部切回。` +
+        `${r.done.length} 个 TIFF + manifest 已写到 ${exp.outDir}\n共 ${totalMB.toFixed(0)}MB\n\n修完回来点「切回原图」，软件会自己扫这个目录，不用你挑文件。` +
         (r.failed.length ? `\n⚠️ ${r.failed.length} 张失败：${r.failed[0].error}` : ''),
         r.failed.length ? 'err' : 'ok', 12000);
       setMessage(`已导出 ${r.done.length}/${r.total} 张画布`);
@@ -389,21 +456,35 @@ export default function App() {
    * 选定要切回的成片后先只做「配对」，不动像素：
    * 让用户先看清楚哪几个能切、各能切出几张、哪个配不上记录，再决定要不要全切。
    */
-  const loadReturned = useCallback(async (files) => {
-    if (!files || !files.length) return;
-    const p = await pc.recoverPlan(files);
-    setRec((v) => ({ ...v, files, plan: p }));
-    const bad = p.total - p.okCount;
-    if (!p.okCount) {
-      toast('没找到合成记录', '选中的文件旁边要有导出时生成的 .manifest.json', 'err', 9000);
-    } else if (bad) {
-      toast(`配对成功 ${p.okCount} / ${p.total}`,
-        `有 ${bad} 个文件旁边缺 .manifest.json，会被跳过。可切回 ${p.imageCount} 张原图。`, 'err', 9000);
-    } else {
-      toast(`已配对 ${p.okCount} 张画布`,
-        `共可切回 ${p.imageCount} 张原图${p.okCount > 1 ? '，点一下全部切回' : ''}。`, 'ok');
-    }
-  }, [toast]);
+  /**
+   * 常规切回路径：直接扫导出目录，不用用户挑文件。
+   * 用户的原话：「切回原图应该自带的有默认的路径呀和导出的一样才对呀，
+   * 特殊情况额外才需要自己选图片进行切回」。
+   */
+  const scanExport = useCallback(async () => {
+    setBusy(true); setMessage('正在扫导出目录…');
+    try {
+      const r = await pc.scanExportDir();
+      if (!r?.okCount) {
+        toast('导出目录里没找到成片',
+          `扫的是 ${r?.dir || '导出目录'}。要么还没导出，要么像素蛋糕把文件存到别处了 —— 那种情况用「选文件（多选）」。`,
+          'err', 10000);
+        setMessage('');
+        return;
+      }
+      await loadReturned(r.rows.filter((x) => x.ok).map((x) => x.file));
+      setMessage(`扫到 ${r.okCount} 张画布`);
+    } catch (e) {
+      toast('扫描失败', e.message, 'err');
+    } finally { setBusy(false); setProgress(null); }
+  }, [loadReturned, toast]);
+
+  const clearLibrary = useCallback(async () => {
+    if (!library?.batches?.length) return;
+    const r = await pc.clearLibrary();
+    setLibrary(r);
+    toast('历史批次已清空', '磁盘上的成片没动，只是不再列出来了。', 'ok');
+  }, [library, toast]);
 
   const pickReturned = useCallback(async () => loadReturned(await pc.pickReturned()), [loadReturned]);
 
@@ -487,7 +568,7 @@ export default function App() {
   }, [selectedId, removeItem, addImages, compose, composeAll, autoLayout, planIndex, plan]);
 
   useEffect(() => {
-    window.__pcDebug = { items, canvas, images, plan, planIndex, selectedId, canvases: canvases.length };
+    window.__pcDebug = { items, canvas, images, plan, planIndex, selectedId, canvases: canvases.length, importList };
   });
 
   return (
@@ -548,7 +629,11 @@ export default function App() {
           setExp={setExp} onCompose={compose} onComposeAll={composeAll} busy={busy}
           rec={rec} setRec={setRec} onRecover={recover}
           onPickReturned={pickReturned}
-          onPickOutDir={async () => { const d = await pc.pickFolder('选择切分输出位置'); if (d) { setRec((v) => ({ ...v, outDir: d })); await pc.setSettings({ recoverDir: d }); } }}
+          recoverDir={rec.outDir}
+          onPickOutDir={async () => { const d = await pc.pickFolder('选择切回原图的输出位置'); if (d) { setRec((v) => ({ ...v, outDir: d })); await pc.setSettings({ recoverDir: d }); } }}
+          onResetOutDir={async () => { setRec((v) => ({ ...v, outDir: '' })); const st = await pc.setSettings({ recoverDir: '' }); if (st?.recoverDir) setRec((v) => ({ ...v, outDir: st.recoverDir })); }}
+          onScanExport={scanExport}
+          onClearLibrary={clearLibrary}
           library={library} onForget={forget} onReveal={pc.reveal} onReuseBatch={reuseBatch}
           sys={sys} onSetJobs={setJobs}
         />

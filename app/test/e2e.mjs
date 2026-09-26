@@ -16,9 +16,10 @@ import { composeCanvas } from '../main/services/render.mjs';
 import { splitCanvas } from '../main/services/split.mjs';
 import { extractExif, stripThumbnail, injectExif, hasExif, normalizeOrientation } from '../main/services/exif.mjs';
 import { probeImage } from '../main/services/library.mjs';
-import { findManifestFor, planRecover } from '../main/services/recover.mjs';
+import { findManifestFor, planRecover, scanDirForCanvases } from '../main/services/recover.mjs';
+import { pruneSession, sessionPayload } from '../main/services/session.mjs';
 import { exportConcurrency, splitConcurrency, splitPlan, createLimiter, mapLimit, delay, exportJobMB } from '../main/services/pool.mjs';
-import { EXPORT_SUBDIR, normalizeSettings, cleanPatch, exportDirOf, recoverDirOf } from '../main/services/settings.mjs';
+import { EXPORT_SUBDIR, RECOVER_SUBDIR, normalizeSettings, cleanPatch, exportDirOf, recoverDirOf } from '../main/services/settings.mjs';
 import { renderCanvas, makeBaseName } from '../main/services/export.mjs';
 import {
   findFreeSpot, snapPosition, tightBounds, validateCanvas, tooClose, asRect, overlaps,
@@ -542,6 +543,93 @@ H('⑪ 批量切回：找对 .manifest.json（batch / batch2 不能串台）');
     '配不上的那一行给出人话原因', plan.rows.find((r) => !r.ok)?.reason);
   ok(plan.rows.find((r) => r.ok)?.file === tif('batch'),
     '配对结果带回原始文件路径（供后续切分）');
+
+  // ── 导入时的画布识别必须用 exactOnly ──
+  // 否则一张名字沾边的普通照片会被误认成画布、直接从导入列表里消失
+  ok(findManifestFor(tif('batch_c01'), { exactOnly: true }) === null,
+    '导入识别用 exactOnly：名字沾边但不精确的不算画布（普通照片不会被误吞）');
+  ok(findManifestFor(tif('batch'), { exactOnly: true })?.manifest?.items?.length === 6,
+    '导入识别用 exactOnly：精确同名的照样认得出', '6 项');
+  const peek = planRecover([tif('batch'), tif('batch_c01')], { exactOnly: true });
+  ok(peek.okCount === 1, '导入探测只把真正带记录的挑出来', `okCount ${peek.okCount}`);
+
+  // ── 扫码切回：常规路径，用户不该手选文件 ──
+  fs.mkdirSync(path.join(dir, '预览图'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '预览图', 'batch.preview.jpg'), 'x');  // 预览图不是成片
+  fs.writeFileSync(path.join(dir, 'DSC01234.ARW'), 'x');    // 原图不该被当成成片
+  fs.writeFileSync(path.join(dir, 'lonely.jpg'), 'x');      // 没 manifest 的散图
+  const scan = scanDirForCanvases(dir);
+  const hit = scan.rows.filter((r) => r.ok).map((r) => r.name);
+  const miss = scan.rows.filter((r) => !r.ok).map((r) => r.name);
+  // batch_c01.tif 只有前缀能沾上（没有精确同名记录），散图也没有 → 都算"配不上"。
+  // 扫码宁严勿宽：扫的是软件自己写出去的目录，正规成片一定是精确同名配上的。
+  ok(hit.length === 3 && miss.includes('batch_c01.tif') && miss.includes('lonely.jpg'),
+    '扫码把精确配上的成片挑出来，配不上的单独列出来（不静默吞掉）',
+    `成片 ${hit.join('/')} · 配不上 ${miss.join('/')}`);
+  ok(!scan.rows.some((r) => r.name === 'batch.preview.jpg'),
+    '扫码时排除「预览图/」里的预览小图（它不是成片）');
+  ok(!scan.rows.some((r) => r.name.endsWith('.ARW')),
+    '扫码时排除 RAW 原图（只认像素蛋糕能导出的那几种格式）');
+  ok(miss.includes('lonely.jpg'), '旁边没有记录的散图被标成配不上（不会混进切回清单）');
+  const names = scan.rows.map((r) => r.name);
+  ok(names.length > 0 && [...names].sort().join() === names.join(),
+    '扫码结果按文件名排序（用户对着列表看能对上号）', names.join(' / '));
+  ok(scanDirForCanvases(path.join(dir, '不存在')).okCount === 0,
+    '扫一个不存在的目录不炸，返回空清单');
+}
+
+// ─────────────────────── 11b. 会话：退出重进别丢工作 ───────────────────────
+H('⑪′ 会话：退出重进接着干（原图被删了也要稳住）');
+
+{
+  const s = (id, extra = {}) => ({ id, path: `/photos/${id}.jpg`, thumbPath: `${TMP}/thumbs/${id}.jpg`, ...extra });
+  const c = (over = {}) => ({
+    width: 9000, height: 5000, util: 0.9, strategy: 'binpack',
+    placed: [{ id: 'a', x: 0, y: 0, w: 4000, h: 5000 }, { id: 'b', x: 4000, y: 0, w: 4000, h: 5000 }],
+    ...over,
+  });
+  const raw = {
+    images: [s('a'), s('b'), s('c')],
+    plan: { canvases: [c(), c({ manual: true, placed: [] })] },
+    planIndex: 5, allowRotate: true, gutter: 32, name: 'wedding',
+  };
+
+  const full = pruneSession(raw, { exists: () => true });
+  ok(full.images.length === 3, '原图都还在时全部恢复', `${full.images.length} 张`);
+  ok(full.plan.canvases.length === 2, '画布跟着一起恢复（不是只恢复照片列表）');
+  ok(full.plan.canvases[0].placed.length === 2, '画布上的图还在');
+  ok(full.planIndex === 1, 'planIndex 被夹回合法范围（原来存的是 5）', `${full.planIndex}`);
+  ok(full.gutter === 32 && full.name === 'wedding' && full.allowRotate === true,
+    '保护带 / 批次名 / 旋转开关都跟着恢复');
+
+  // 原图被删掉一张 → 它也从画布上被摘掉，而不是留个黑块
+  const gone = pruneSession(raw, { exists: (p) => !p.includes('/b.') && !p.includes('/thumbs/b.') });
+  ok(gone.images.length === 2, '原图被删掉的那张从会话里剔掉', `${gone.images.length} 张`);
+  ok(gone.plan.canvases[0].placed.length === 1 && gone.plan.canvases[0].placed[0].id === 'a',
+    '被删的那张也从画布上摘掉（不留黑块、不留空引用）');
+
+  // 缩略图丢了也算不可用（会显示成黑图）
+  const noThumb = pruneSession(raw, { exists: (p) => !p.includes('/thumbs/a.') });
+  ok(noThumb.images.length === 2, '缩略图没了的也算不可用（否则界面一片黑）');
+
+  // 自动画布空了就丢掉；手工画布即使空了也是用户特意留的
+  const emptied = pruneSession({
+    images: [s('a')],
+    plan: { canvases: [c({ placed: [{ id: 'b', x: 0, y: 0, w: 1, h: 1 }] }), c({ manual: true, placed: [] })] },
+  }, { exists: () => true });
+  ok(emptied.plan.canvases.length === 1 && emptied.plan.canvases[0].manual,
+    '图都没了的自动画布丢掉，空的手工画布留着');
+
+  ok(pruneSession({ images: [] }, { exists: () => true }) === null,
+    '一张能用的图都没有就当作没有会话（不恢复出一个空壳）');
+  ok(pruneSession(null) === null, '没有会话文件时返回 null，不炸');
+  ok(pruneSession({ images: 'nope', plan: null }) === null, '会话内容被写坏时当作没有，不炸');
+
+  // 存盘只带白名单字段
+  const payload = sessionPayload({ images: [s('a')], plan: { canvases: [] }, junk: '别存我', planIndex: 2 });
+  ok(!('junk' in payload), '存盘只挑认识的字段');
+  ok(typeof payload.savedAt === 'string' && payload.savedAt.includes('T'),
+    '存盘带上时间戳（排查问题时能看出是哪次）', payload.savedAt);
 }
 
 // ─────────────────────── 12. 并行：并发池 / 多进程那套的底座 ───────────────────────
@@ -684,8 +772,11 @@ H('⑬ 导出位置：自动建「像素拼图导出」子文件夹 + 用户选�
   ok(exportDirOf(def) === path.join(PICS, EXPORT_SUBDIR),
     '导出目录 = 父目录 + 「像素拼图导出」（不会直接躺在图片目录里）', exportDirOf(def));
   ok(EXPORT_SUBDIR === '像素拼图导出', '子文件夹名字就是「像素拼图导出」', EXPORT_SUBDIR);
-  ok(!def.recoverDir, '切回目录默认留空（跟着导出目录走）');
-  ok(recoverDirOf(def) === exportDirOf(def), '切回目录留空时 = 导出目录');
+  ok(!def.recoverDir, '切回目录默认留空（自动推导）');
+  // 切回的原图不能和画布成片混在一个目录里，所以默认是导出目录**旁边**的「切回原图」
+  ok(recoverDirOf(def) === path.join(PICS, RECOVER_SUBDIR),
+    '切回目录留空时 = 导出父目录旁边的「切回原图」（自带文件夹，不用用户选）', recoverDirOf(def));
+  ok(RECOVER_SUBDIR === '切回原图', '切回子文件夹名字就是「切回原图」', RECOVER_SUBDIR);
 
   // 用户手选父目录
   const picked = normalizeSettings({ exportParent: '/Volumes/T7' }, { pictures: PICS, exists });
@@ -697,7 +788,8 @@ H('⑬ 导出位置：自动建「像素拼图导出」子文件夹 + 用户选�
   ok(gone.exportParent === PICS, '父目录不见了会自动退回「图片」目录（导出不会直接失败）', gone.exportParent);
   // 切回目录单独设过，但那个目录也没了 → 退回跟着导出目录
   const goneRec = normalizeSettings({ recoverDir: '/Volumes/拔掉了/切回' }, { pictures: PICS, exists });
-  ok(recoverDirOf(goneRec) === exportDirOf(goneRec), '切回目录失效后跟着导出目录走');
+  ok(recoverDirOf(goneRec) === path.join(PICS, RECOVER_SUBDIR),
+    '切回目录失效后回到默认位置（导出父目录旁边的「切回原图」）', recoverDirOf(goneRec));
   // 设过的有效切回目录要保住
   const keepRec = normalizeSettings({ recoverDir: '/Volumes/T7/交付' }, { pictures: PICS, exists });
   ok(recoverDirOf(keepRec) === '/Volumes/T7/交付', '有效的切回目录不会被覆盖', recoverDirOf(keepRec));

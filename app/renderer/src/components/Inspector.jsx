@@ -22,7 +22,8 @@ export default function Inspector(p) {
     items, canvas, hint, gutter, setGutter, problems, selectedId, onMove, onRemove,
     allowRotate, setAllowRotate, rotCount, capacity, canvasCount, maxPerCanvas,
     exp, setExp, onCompose, onComposeAll, busy,
-    rec, setRec, onRecover, onPickReturned, onPickOutDir,
+    rec, setRec, onRecover, onPickReturned, onPickOutDir, recoverDir, onResetOutDir,
+    onScanExport, onClearLibrary,
     library, onForget, onReveal, onReuseBatch, sys, onSetJobs,
   } = p;
 
@@ -289,15 +290,18 @@ export default function Inspector(p) {
       </div>
       <div className="insp-group">
         <div className="card">
-          <Field label="像素蛋糕修完的成片">
-            <button className="btn sm" style={{ width: '100%', justifyContent: 'center' }}
-              onClick={onPickReturned}>选文件（可多选）</button>
-          </Field>
+          <button className="btn primary" style={{ width: '100%', justifyContent: 'center' }}
+            onClick={onScanExport} disabled={busy}>
+            扫码切回（默认路径）
+          </button>
+          <div className="alt-row">
+            <button className="btn ghost sm" onClick={onPickReturned}>像素蛋糕存到别处了？手动选</button>
+          </div>
 
           {!rec.plan && (
             <div className="hint">
-              一次把这一批画布全按住 ⌘/⇧ 多选进来就行。<br />
-              成片旁边要有导出时生成的 <b>.manifest.json</b>，软件按文件名自动配对，不用自己对号。
+              常规流程不用选文件：软件会去扫导出目录，自动把成片和 <b>.manifest.json</b> 配好对。<br />
+              只有换过目录、或分批导过的时候，才用下面那个「手动选」。
             </div>
           )}
 
@@ -325,9 +329,15 @@ export default function Inspector(p) {
           <Field label="输出到">
             <div className="path-pick">
               <input className="input" value={rec.outDir} readOnly placeholder="选择文件夹…" />
-              <button className="btn sm" onClick={onPickOutDir}>选择</button>
+              <button className="btn sm" onClick={onPickOutDir}>更改…</button>
             </div>
           </Field>
+          <div className="hint">
+            和导出一样自带一个文件夹，切回来的原图有地方放，不用每次手选。
+            {String(rec.outDir || '').includes('切回原图') && (
+              <> 想改回默认可以 <button className="link-btn" onClick={onResetOutDir}>恢复默认位置</button>。</>
+            )}
+          </div>
           <div className="row2">
             <Field label="输出格式">
               <select className="select" value={rec.format} onChange={(e) => setRec({ ...rec, format: e.target.value })}>
@@ -362,6 +372,7 @@ export default function Inspector(p) {
           <div className="section-head">
             <span className="section-title">历史批次</span>
             <span className="count-pill">{library.batches.length}</span>
+            <button className="link-btn right" onClick={onClearLibrary}>一键清空</button>
           </div>
           <div className="insp-group" style={{ paddingBottom: 20 }}>
             {library.batches.slice(0, 12).map((b) => (

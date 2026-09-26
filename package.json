@@ -1,0 +1,32 @@
+{
+  "name": "pixcake-tiler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "把多张照片 1:1 无损拼成一张像素蛋糕可处理的画布，美颜后再切回原图",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build",
+    "start": "npm run build && electron .",
+    "package": "npm run build && node scripts/package.mjs",
+    "icon": "node scripts/make-icon.mjs",
+    "test": "node app/test/e2e.mjs",
+    "m0:gen": "node tools/m0-generate.mjs",
+    "m0:cmp": "node tools/m0-compare.mjs"
+  },
+  "dependencies": {
+    "sharp": "^0.34.0"
+  },
+  "main": "app/main/main.mjs",
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
+    "electron": "^44.4.5",
+    "exif-reader": "^2.0.3",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "vite": "^8.3.1"
+  },
+  "productName": "像素拼图"
+}

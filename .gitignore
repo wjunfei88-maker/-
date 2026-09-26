@@ -1,0 +1,16 @@
+# ── 依赖与构建产物 ──
+node_modules/
+dist/
+release/
+
+# ── 运行时数据（体积大、可重新生成）──
+inbox/
+outbox/
+
+# ── M0 探针产物：只保留结论性文本，丢弃几百 MB 的 TIFF ──
+probes/*.tif
+probes/*.png
+probes/*.jpg
+
+# ── macOS ──
+.DS_Store

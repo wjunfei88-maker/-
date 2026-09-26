@@ -109,8 +109,9 @@ export default function App() {
   // ── 启动 ──
   const bootRef = useRef(false);
   useEffect(() => pc.info().then((i) => {
-    setExp((e) => ({ ...e, outDir: i.home + '/像素拼图输出' }));
-    setRec((r) => ({ ...r, outDir: i.home + '/像素拼图输出/切回' }));
+    // 导出位置 = 用户选的父目录 + 固定的「像素拼图导出」子文件夹（主进程算好给过来的）
+    setExp((e) => ({ ...e, outDir: i.exportDir || i.home, subdir: i.subdir || '像素拼图导出' }));
+    setRec((r) => ({ ...r, outDir: i.settings?.recoverDir || i.exportDir || i.home }));
     setSys(i.plan ?? null);
     if (i.demoFiles?.length && !bootRef.current) {
       bootRef.current = true;
@@ -429,10 +430,26 @@ export default function App() {
 
   /** 从历史批次点进来：直接开文件选择 —— manifest 会自动按文件名配上，不用手动指 */
   const reuseBatch = useCallback(async (b) => {
-    setRec((v) => ({ ...v, outDir: v.outDir || b.canvasFile.replace(/\/[^/]+$/, '/切回') }));
+    // 输出目录不再从成片路径猜（成片现在住在「像素拼图导出」里），直接用设置里的
+    setRec((v) => ({ ...v, outDir: v.outDir || exp.outDir }));
     toast('已载入批次', `${b.name} · ${b.count} 张。把像素蛋糕导出的成片选进来（可多选）。`);
     await loadReturned(await pc.pickReturned());
-  }, [loadReturned, toast]);
+  }, [loadReturned, toast, exp.outDir]);
+
+  /** 改并发数（0 = 自动）。主进程会重新算一遍并把结果回给我们，界面如实显示。 */
+  const setJobs = useCallback(async (kind, n) => {
+    const r = await pc.setSettings(kind === 'export' ? { exportJobs: n } : { splitJobs: n });
+    setSys(r.plan);
+  }, []);
+
+  /** 改导出位置：选的是**父目录**，软件在里面自动建「像素拼图导出」 */
+  const pickExportParent = useCallback(async () => {
+    const d = await pc.pickFolder('选择导出位置（软件会在里面自动建「像素拼图导出」文件夹）');
+    if (!d) return;
+    const r = await pc.setSettings({ exportParent: d });
+    setExp((v) => ({ ...v, outDir: r.exportDir }));
+    toast('导出位置已改', `成片会放进 ${r.exportDir}`);
+  }, [toast]);
 
   const forget = useCallback(async (id) => setLibrary(await pc.forget(id)), []);
 
@@ -527,13 +544,13 @@ export default function App() {
           problems={problems} selectedId={selectedId} onMove={moveItem} onRemove={removeItem}
           allowRotate={allowRotate} setAllowRotate={toggleRotate} rotCount={rotCount}
           capacity={capacity} canvasCount={canvases.length} maxPerCanvas={maxPerCanvas}
-          exp={{ ...exp, onPickDir: async () => { const d = await pc.pickFolder('选择合成图保存位置'); if (d) setExp((v) => ({ ...v, outDir: d })); } }}
+          exp={{ ...exp, onPickDir: pickExportParent }}
           setExp={setExp} onCompose={compose} onComposeAll={composeAll} busy={busy}
           rec={rec} setRec={setRec} onRecover={recover}
           onPickReturned={pickReturned}
-          onPickOutDir={async () => { const d = await pc.pickFolder('选择切分输出位置'); if (d) setRec((v) => ({ ...v, outDir: d })); }}
+          onPickOutDir={async () => { const d = await pc.pickFolder('选择切分输出位置'); if (d) { setRec((v) => ({ ...v, outDir: d })); await pc.setSettings({ recoverDir: d }); } }}
           library={library} onForget={forget} onReveal={pc.reveal} onReuseBatch={reuseBatch}
-          sys={sys}
+          sys={sys} onSetJobs={setJobs}
         />
       </div>
 

@@ -9,9 +9,12 @@ import { probeImage, makeThumb, shortId, IMAGE_EXT } from './services/library.mj
 const sharpMeta = (f) => sharpLib(f, { unlimited: true }).metadata();
 import { planGroups, packCanvas, CANVAS_LIMIT, capacityHint, capacityExplain } from './services/layout.mjs';
 import { renderCanvas, makeBaseName } from './services/export.mjs';
-import { exportConcurrency, splitConcurrency, createLimiter } from './services/pool.mjs';
+import { exportConcurrency, splitPlan, createLimiter } from './services/pool.mjs';
 import { splitCanvas } from './services/split.mjs';
 import { findManifestFor, planRecover } from './services/recover.mjs';
+import {
+  EXPORT_SUBDIR as SETTINGS_SUBDIR, normalizeSettings, cleanPatch, exportDirOf, recoverDirOf,
+} from './services/settings.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const DEV_URL = process.env.VITE_DEV_SERVER_URL;
@@ -43,6 +46,43 @@ function writeLibrary(data) {
   fs.writeFileSync(libraryFile(), JSON.stringify(data, null, 2));
 }
 
+/**
+ * 导出位置与并发数设置。
+ * 具体规则（子文件夹名、父目录失效怎么办、并发数怎么夹）都在 services/settings.mjs 里，
+ * 那样才能被 npm test 覆盖 —— 这些规则一旦错都是"静默"的。
+ */
+const EXPORT_SUBDIR = SETTINGS_SUBDIR;
+
+function settingsFile() { return path.join(app.getPath('userData'), 'settings.json'); }
+
+function readSettings() {
+  let raw = {};
+  try { raw = JSON.parse(fs.readFileSync(settingsFile(), 'utf8')); } catch { /* 首次运行还没有这个文件 */ }
+  return normalizeSettings(raw, { pictures: app.getPath('pictures'), exists: fs.existsSync });
+}
+
+function writeSettings(patch = {}) {
+  const next = { ...readSettings(), ...cleanPatch(patch) };
+  fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
+  fs.writeFileSync(settingsFile(), JSON.stringify(next, null, 2));
+  return next;
+}
+
+/** 界面要的那一份：设置 + 算好的两个目录 + 两个并发推导 */
+function settingsView() {
+  const settings = readSettings();
+  return {
+    settings,
+    exportDir: exportDirOf(settings),
+    recoverDir: recoverDirOf(settings),
+    subdir: EXPORT_SUBDIR,
+    plan: {
+      export: exportConcurrency([], settings.exportJobs),
+      split: splitPlan(settings.splitJobs),
+    },
+  };
+}
+
 // ─────────────────────────── IPC ───────────────────────────
 const send = (channel, payload) => { if (win && !win.isDestroyed()) win.webContents.send(channel, payload); };
 
@@ -62,8 +102,17 @@ ipcMain.handle('app:info', () => {
     home: app.getPath('pictures'),
     limit: CANVAS_LIMIT,
     demoFiles,
-    plan: { export: exportConcurrency(), split: splitConcurrency() },
+    ...settingsView(),
   };
+});
+
+/**
+ * 改设置。并发数改了要立刻把新的推导结果返回去，界面才能显示「你指定 8 个」。
+ * 只传要改的字段即可（部分合并）；不认识的字段会被 cleanPatch 丢掉。
+ */
+ipcMain.handle('settings:set', (_e, patch = {}) => {
+  writeSettings(patch);
+  return settingsView();
 });
 
 ipcMain.handle('dialog:pickImages', async () => {
@@ -218,9 +267,15 @@ function recordExport({ payload, id, safe, base, outDir, canvasFile, previewFile
  * 「全部导出」走的是 worker 进程版本，见 export:composeAll。
  */
 async function exportOne(payload, { suffix = '', onProgress } = {}) {
-  const { items, name, outDir } = payload;
+  const { items, name } = payload;
   if (!items?.length) throw new Error('画布上还没有图片');
+  // 导出位置一律由设置推导：<父目录>/像素拼图导出。
+  // 不信任渲染层传来的路径 —— 两边不一致时成片会散落到别的地方，用户找不到。
+  const outDir = exportDirOf(readSettings());
   fs.mkdirSync(outDir, { recursive: true });
+  // 把推导出来的目录写回 payload —— renderCanvas 是按 payload.outDir 落盘的，
+  // 不覆盖的话渲染层传了个旧路径就会写到别处去（成片和 manifest 分家）。
+  payload = { ...payload, outDir };
   const id = shortId(6);
   const safe = (name || 'batch').replace(/[/\\:*?"<>|]/g, '_');
   const base = makeBaseName(name, id, suffix);
@@ -288,7 +343,11 @@ function runOneInWorker({ job, total, onProgress }) {
 ipcMain.handle('export:composeAll', async (_e, payload) => {
   const { canvases = [], ...rest } = payload;
   if (!canvases.length) return { total: 0, done: [], failed: [], workers: 0 };
-  fs.mkdirSync(rest.outDir, { recursive: true });
+  const settings = readSettings();
+  // 同上：导出目录由设置推导，渲染层传什么都不作数
+  const outDir = exportDirOf(settings);
+  rest.outDir = outDir;
+  fs.mkdirSync(outDir, { recursive: true });
 
   const jobs = canvases.map((c, i) => {
     const id = shortId(6);
@@ -301,7 +360,7 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
     };
   });
 
-  const plan = exportConcurrency(canvases.map((c) => ({ width: c.width, height: c.height })));
+  const plan = exportConcurrency(canvases.map((c) => ({ width: c.width, height: c.height })), settings.exportJobs);
   // 多个进程同时开时，每个进程内部的解码并行度要收着点，否则 3 个进程 × 4 线程会把内存打满
   const perPanel = Math.max(1, Math.floor(plan.cores / plan.workers));
   for (const j of jobs) j.panelConcurrency = perPanel;
@@ -333,7 +392,7 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
   const finalize = (job, r) => {
     active.delete(job.index);
     try {
-      const entry = recordExport({ payload: job.payload, id: job.id, safe: job.safe, base: job.base, outDir: rest.outDir, ...r });
+      const entry = recordExport({ payload: job.payload, id: job.id, safe: job.safe, base: job.base, outDir, ...r });
       done.push({ index: job.index, ...entry });
     } catch (e) {
       failed.push({ index: job.index, error: e.message });
@@ -391,16 +450,18 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
 /** 切回原图 */
 ipcMain.handle('recover:split', async (_e, payload) => {
   const { manifestFile, returnedFile, outDir, format, quality, keepExif } = payload;
+  const settings = readSettings();
+  const dest = outDir || recoverDirOf(settings);
   const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
   const report = await splitCanvas({
-    returnedFile, manifest, outDir,
+    returnedFile, manifest, outDir: dest,
     format: format || 'jpeg', quality: quality ?? 14, keepExif: keepExif !== false,
-    concurrency: splitConcurrency(),
+    concurrency: splitPlan(settings.splitJobs).workers,
     onProgress: (p) => send('progress', p),
   });
   const lib = readLibrary();
   const b = lib.batches.find((x) => x.id === manifest.id);
-  if (b) { b.lastRecoverAt = new Date().toISOString(); b.lastRecoverOut = outDir; writeLibrary(lib); }
+  if (b) { b.lastRecoverAt = new Date().toISOString(); b.lastRecoverOut = dest; writeLibrary(lib); }
   return report;
 });
 
@@ -429,10 +490,12 @@ ipcMain.handle('recover:plan', (_e, { files = [] } = {}) => planRecover(files));
 ipcMain.handle('recover:splitMany', async (_e, payload) => {
   const { files = [], outDir, format, quality, keepExif } = payload;
   if (!files.length) return { total: 0, done: [], failed: [], outputs: 0, lossless: 0, warnings: [] };
+  const settings = readSettings();
+  const dest = outDir || recoverDirOf(settings);
 
   // 一个**全局**闸门管住所有画布的所有刀，而不是每张画布各管各的：
   // 画布有的 4 刀有的 2 刀，按文件加锁会在小画布上跑不满 CPU。
-  const concurrency = splitConcurrency();
+  const concurrency = splitPlan(settings.splitJobs).workers;
   const gate = createLimiter(concurrency);
 
   const done = [];
@@ -450,7 +513,7 @@ ipcMain.handle('recover:splitMany', async (_e, payload) => {
       const found = findManifestFor(f);
       if (!found) throw new Error('找不到配套的 .manifest.json');
       const report = await splitCanvas({
-        returnedFile: f, manifest: found.manifest, outDir,
+        returnedFile: f, manifest: found.manifest, outDir: dest,
         format: format || 'jpeg', quality: quality ?? 14, keepExif: keepExif !== false,
         limiter: gate,
         onProgress: (p) => {
@@ -463,7 +526,7 @@ ipcMain.handle('recover:splitMany', async (_e, payload) => {
       });
       const lib = readLibrary();
       const b = lib.batches.find((x) => x.id === found.manifest.id);
-      if (b) { b.lastRecoverAt = new Date().toISOString(); b.lastRecoverOut = outDir; writeLibrary(lib); }
+      if (b) { b.lastRecoverAt = new Date().toISOString(); b.lastRecoverOut = dest; writeLibrary(lib); }
       done.push({
         index: i, file: f, name: path.basename(f), manifestFile: found.manifestFile,
         outputs: report.outputs.length,

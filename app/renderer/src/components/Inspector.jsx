@@ -23,7 +23,7 @@ export default function Inspector(p) {
     allowRotate, setAllowRotate, rotCount, capacity, canvasCount, maxPerCanvas,
     exp, setExp, onCompose, onComposeAll, busy,
     rec, setRec, onRecover, onPickReturned, onPickOutDir,
-    library, onForget, onReveal, onReuseBatch, sys,
+    library, onForget, onReveal, onReuseBatch, sys, onSetJobs,
   } = p;
 
   const over = canvas.width > 12000 || canvas.height > 12000;
@@ -199,13 +199,14 @@ export default function Inspector(p) {
           </Field>
           <Field label="保存到">
             <div className="path-pick">
-              <input className="input" value={exp.outDir} readOnly placeholder="选择文件夹…" />
-              <button className="btn sm" onClick={exp.onPickDir}>选择</button>
+              <input className="input" value={exp.outDir} readOnly placeholder="选择位置…" />
+              <button className="btn sm" onClick={exp.onPickDir}>更改…</button>
             </div>
           </Field>
           <div className="hint" style={{ marginTop: -2 }}>
-            成片（<span className="mono">.tif</span> + <span className="mono">.manifest.json</span>）放在这个目录。
-            界面回显用的预览小图会自动收进子文件夹 <span className="mono">预览图/</span>，不用管它。
+            选一个位置就行，软件会在里面自动建 <span className="mono">{exp.subdir || '像素拼图导出'}/</span> 文件夹，
+            成片（<span className="mono">.tif</span> + <span className="mono">.manifest.json</span>）都放进去，
+            不会和别的文件混在一起。界面回显用的预览小图再收进一层 <span className="mono">预览图/</span>。
           </div>
           <div className="row2">
             <Field label="格式">
@@ -247,10 +248,34 @@ export default function Inspector(p) {
           {sys && (
             <div className="perf-note" title="TIFF 压缩本身只用一个核，所以靠「同时导多张」把机器用满；内存不够时会自动降到 1。">
               <span className="pn-dot" />
-              这台机器：<b>{sys.export.workers}</b> 个进程并行导出 · 切回 <b>{sys.split}</b> 路并行
+              这台机器：导出最多能开 <b>{sys.export.max}</b> 个 · 切回最多 <b>{sys.split.max}</b> 路
               <span className="pn-sub">{sys.export.reason}</span>
             </div>
           )}
+          {sys && (
+            <div className="row2" style={{ marginTop: 8 }}>
+              <Field label="同时导出">
+                <select className="select" value={sys.export.asked}
+                  onChange={(e) => onSetJobs('export', Number(e.target.value))}>
+                  <option value={0}>自动（推荐 {sys.export.recommended}）</option>
+                  {Array.from({ length: sys.export.max }, (_, i) => i + 1).map((n) => (
+                    <option key={n} value={n}>{n} 个{n === 1 ? '（不并行，最省内存）' : ''}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="切回并行">
+                <select className="select" value={sys.split.asked}
+                  onChange={(e) => onSetJobs('split', Number(e.target.value))}>
+                  <option value={0}>自动（推荐 {sys.split.recommended}）</option>
+                  {Array.from({ length: sys.split.max }, (_, i) => i + 1).map((n) => (
+                    <option key={n} value={n}>{n} 路</option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+          )}
+          {sys?.export?.clampNote && <div className="hint warn-hint">{sys.export.clampNote}</div>}
+          {sys?.split?.clampNote && <div className="hint warn-hint">{sys.split.clampNote}</div>}
           <div className="hint">
             导出 TIFF 后直接丢进像素蛋糕，修完**不要改文件名**导出到同一目录，再回来点「切回原图」。
           </div>

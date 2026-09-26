@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('pc', {
   info: () => ipcRenderer.invoke('app:info'),
+  setSettings: (patch) => ipcRenderer.invoke('settings:set', patch),
   pickImages: () => ipcRenderer.invoke('dialog:pickImages'),
   pickFolder: (title) => ipcRenderer.invoke('dialog:pickFolder', title),
   pickFile: (title) => ipcRenderer.invoke('dialog:pickFile', title),

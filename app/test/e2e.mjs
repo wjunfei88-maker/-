@@ -17,7 +17,8 @@ import { splitCanvas } from '../main/services/split.mjs';
 import { extractExif, stripThumbnail, injectExif, hasExif, normalizeOrientation } from '../main/services/exif.mjs';
 import { probeImage } from '../main/services/library.mjs';
 import { findManifestFor, planRecover } from '../main/services/recover.mjs';
-import { exportConcurrency, splitConcurrency, createLimiter, mapLimit, delay, exportJobMB } from '../main/services/pool.mjs';
+import { exportConcurrency, splitConcurrency, splitPlan, createLimiter, mapLimit, delay, exportJobMB } from '../main/services/pool.mjs';
+import { EXPORT_SUBDIR, normalizeSettings, cleanPatch, exportDirOf, recoverDirOf } from '../main/services/settings.mjs';
 import { renderCanvas, makeBaseName } from '../main/services/export.mjs';
 import {
   findFreeSpot, snapPosition, tightBounds, validateCanvas, tooClose, asRect, overlaps,
@@ -668,6 +669,75 @@ H('⑫ 并行：并发上限、低配机器自动降级、保序');
   ok(par.outputs.every((o) => o.lossless), '并行切分仍然逐张判定为无损',
     `${par.outputs.filter((o) => o.lossless).length}/${par.outputs.length}`);
   ok(par.outputs.every((o) => typeof o.ms === 'number'), '每张切分都带回自己的耗时', par.outputs.map((o) => `${o.name}:${o.ms}ms`).join(' '));
+}
+
+H('⑬ 导出位置：自动建「像素拼图导出」子文件夹 + 用户选的并发数');
+
+{
+  const PICS = '/Users/someone/Pictures';
+  // 模拟磁盘：只有带「拔掉了」的路径不存在（用来验证"盘拔了怎么办"）
+  const exists = (d) => !String(d).includes('拔掉了');
+
+  // 默认：父目录就是「图片」，导出落在 <图片>/像素拼图导出
+  const def = normalizeSettings({}, { pictures: PICS, exists });
+  ok(def.exportParent === PICS, '默认父目录是系统「图片」文件夹', def.exportParent);
+  ok(exportDirOf(def) === path.join(PICS, EXPORT_SUBDIR),
+    '导出目录 = 父目录 + 「像素拼图导出」（不会直接躺在图片目录里）', exportDirOf(def));
+  ok(EXPORT_SUBDIR === '像素拼图导出', '子文件夹名字就是「像素拼图导出」', EXPORT_SUBDIR);
+  ok(!def.recoverDir, '切回目录默认留空（跟着导出目录走）');
+  ok(recoverDirOf(def) === exportDirOf(def), '切回目录留空时 = 导出目录');
+
+  // 用户手选父目录
+  const picked = normalizeSettings({ exportParent: '/Volumes/T7' }, { pictures: PICS, exists });
+  ok(exportDirOf(picked) === path.join('/Volumes/T7', EXPORT_SUBDIR),
+    '换成别的盘之后，子文件夹照样自动建', exportDirOf(picked));
+
+  // 父目录被删/拔盘 → 退回「图片」，不能让导出直接崩
+  const gone = normalizeSettings({ exportParent: '/Volumes/拔掉了' }, { pictures: PICS, exists });
+  ok(gone.exportParent === PICS, '父目录不见了会自动退回「图片」目录（导出不会直接失败）', gone.exportParent);
+  // 切回目录单独设过，但那个目录也没了 → 退回跟着导出目录
+  const goneRec = normalizeSettings({ recoverDir: '/Volumes/拔掉了/切回' }, { pictures: PICS, exists });
+  ok(recoverDirOf(goneRec) === exportDirOf(goneRec), '切回目录失效后跟着导出目录走');
+  // 设过的有效切回目录要保住
+  const keepRec = normalizeSettings({ recoverDir: '/Volumes/T7/交付' }, { pictures: PICS, exists });
+  ok(recoverDirOf(keepRec) === '/Volumes/T7/交付', '有效的切回目录不会被覆盖', recoverDirOf(keepRec));
+
+  // 并发数：0 = 自动，脏值一律当自动，手选的数字保留
+  ok(normalizeSettings({ exportJobs: 0 }, { pictures: PICS, exists }).exportJobs === 0, '并发 0 = 自动');
+  ok(normalizeSettings({ exportJobs: -3 }, { pictures: PICS, exists }).exportJobs === 0, '负数并发当自动处理');
+  ok(normalizeSettings({ exportJobs: 'x' }, { pictures: PICS, exists }).exportJobs === 0, '乱七八糟的并发值当自动处理');
+  ok(normalizeSettings({ exportJobs: 6 }, { pictures: PICS, exists }).exportJobs === 6, '手选的并发数会被记住', '6');
+
+  // 渲染层能改的字段是白名单，别的一律丢掉
+  const cp = cleanPatch({ exportParent: '/Volumes/T7', exportJobs: 5, evil: 'rm -rf /', __proto__: { x: 1 } });
+  ok(cp.exportParent === '/Volumes/T7' && cp.exportJobs === 5, '白名单保留合法字段', JSON.stringify(cp));
+  ok(!('evil' in cp), '白名单丢掉不认识的字段');
+
+  // 并发推导：推荐值必须 ≤ 上限，上限受核数和内存封顶
+  const ea = exportConcurrency([{ width: 12000, height: 12000 }]);
+  ok(ea.recommended >= 1 && ea.recommended <= ea.max, '推荐并发不超过上限', `推荐 ${ea.recommended} / 上限 ${ea.max}`);
+  ok(ea.max <= ea.cores, '导出上限不超过核数', `${ea.max} ≤ ${ea.cores}`);
+  ok(ea.max <= 12, '导出上限有天花板（12），不会无限开', `上限 ${ea.max}`);
+  ok(ea.byMem >= ea.max || ea.max === ea.cores || ea.max === 12, '上限同时受内存和核数约束');
+
+  // 用户手选：落在范围内照办，超出部分被夹住并给出说明
+  const ask = Math.min(ea.max, 2);
+  const forced = exportConcurrency([], ask);
+  ok(forced.workers === ask && forced.overridden, `用户指定 ${ask} 个就真的用 ${ask} 个`, `workers ${forced.workers}`);
+  ok(forced.asked === ask, '回给界面的 asked 是用户选的数字（下拉框才能对上号）');
+  const tooBig = exportConcurrency([], 999);
+  ok(tooBig.workers === tooBig.max, '选得比上限还大就夹到上限', `${tooBig.workers} = ${tooBig.max}`);
+  ok(tooBig.clamped && tooBig.clampNote.includes(String(tooBig.max)), '被夹住时会如实告诉用户', tooBig.clampNote);
+  const asAuto = exportConcurrency([], 0);
+  ok(asAuto.workers === asAuto.recommended && !asAuto.overridden, '选「自动」时用推荐值', `${asAuto.workers}`);
+
+  // 切回：同样有推荐值、上限、夹取
+  const sp = splitPlan(0);
+  ok(sp.recommended >= 1 && sp.recommended <= sp.max, '切回推荐值不超过上限', `推荐 ${sp.recommended} / 上限 ${sp.max}`);
+  ok(sp.max <= sp.cores && sp.max <= 12, '切回上限受核数和天花板约束', `${sp.max} ≤ ${Math.min(sp.cores, 12)}`);
+  const sp2 = splitPlan(Math.min(3, sp.max));
+  ok(sp2.workers === Math.min(3, sp.max) && sp2.overridden, '切回也能手选并发数', `${sp2.workers} 路`);
+  ok(splitConcurrency(0) === splitPlan(0).workers, 'splitConcurrency 和 splitPlan 给的是同一个数');
 }
 
 // ─────────────────────── 结果 ───────────────────────

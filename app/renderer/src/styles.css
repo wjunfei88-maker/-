@@ -351,6 +351,23 @@ input { user-select: text; }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .path-pick { display: flex; gap: 7px; align-items: center; }
 .path-pick .input { flex: 1; min-width: 0; font-size: 11.5px; color: var(--txt-2); }
+/* 路径用可以换行的文本显示，而不是只读输入框：
+   输入框放不下时会从右边截断，而被截掉的正好是最要紧的目录名。 */
+.path-view {
+  flex: 1; min-width: 0; font-family: var(--mono); font-size: 11px; color: var(--txt-2);
+  background: rgba(0, 0, 0, .28); border: 1px solid var(--line); border-radius: 7px;
+  padding: 5px 8px; word-break: break-all; line-height: 1.5; max-height: 46px; overflow-y: auto;
+}
+.tag-custom {
+  margin-left: 6px; font-style: normal; font-size: 9.5px; padding: 1px 5px; border-radius: 4px;
+  color: var(--accent); background: var(--accent-dim); border: 1px solid var(--accent-line);
+}
+.last-out {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+  font-size: 11px; color: var(--txt-3); margin-top: 8px; padding: 6px 8px;
+  border-radius: 7px; background: rgba(255, 255, 255, .035); border: 1px solid var(--line);
+}
+.last-out .link-btn { margin-left: auto; }
 .hint { font-size: 11.5px; color: var(--txt-3); line-height: 1.65; margin-top: 9px; }
 .hint.warn { color: var(--warn); }
 .hint.danger { color: var(--danger); }

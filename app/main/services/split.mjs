@@ -115,8 +115,11 @@ export async function splitCanvas(opts) {
       await pipe.toFile(outFile);
 
       let exifCopied = false;
+      let exifNothingToCopy = false;
       if (keepExif && fmt === 'jpeg' && it.source && fs.existsSync(it.source)) {
-        exifCopied = await copyExifBetweenFiles(it.source, outFile);
+        const r = await copyExifBetweenFiles(it.source, outFile);
+        exifCopied = r === true;
+        exifNothingToCopy = r === null;   // 原图没有 EXIF（比如某些导出/截图），不是错
       }
       // 转过 90° 的，输出尺寸要和原图对齐（宽高互换回来）再判定无损
       const outW = rotated ? height : width;
@@ -130,6 +133,7 @@ export async function splitCanvas(opts) {
         rotation: it.rotation ?? 0,
         lossless: report.dimsMatch && outW === it.natural.width && outH === it.natural.height,
         exifCopied,
+        exifNothingToCopy,
         source: it.source,
         ms: Date.now() - t0,
       };
@@ -158,7 +162,8 @@ export async function splitCanvas(opts) {
 
   const lossy = report.outputs.filter((o) => !o.lossless && !o.error);
   if (lossy.length) report.warnings.push(`${lossy.length} 张的尺寸与原图不完全一致`);
-  const noExif = report.outputs.filter((o) => !o.exifCopied && keepExif && o.file?.endsWith('.jpg'));
+  // 原图本来就没 EXIF 的不算失败，只有「明明有却搬不过去」才值得警告
+  const noExif = report.outputs.filter((o) => !o.exifCopied && !o.exifNothingToCopy && keepExif && o.file?.endsWith('.jpg') && !o.error);
   if (noExif.length) report.warnings.push(`${noExif.length} 张没能搬回 EXIF（原文件可能已移动或格式不支持）`);
 
   return report;

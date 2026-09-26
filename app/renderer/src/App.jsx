@@ -36,6 +36,10 @@ export default function App() {
   const [message, setMessage] = useState('就绪');
   const [capacity, setCapacity] = useState(null);
   const [sys, setSys] = useState(null);   // 这台机器打算用几个进程/几路并发（app:info 给的）
+  // 上次切回到哪了。toast 会消失、也可能被别的提示顶掉，但「我的原图去哪了」必须一直看得见。
+  const [lastRec, setLastRec] = useState(null);
+  // 默认的切回目录（可能和当前用的不一样 —— 用户以前手选过自定义位置时要能对比出来）
+  const [paths, setPaths] = useState({ defaultRecoverDir: '', recoverSubdir: '切回原图' });
 
   const [exp, setExp] = useState({ name: 'batch', outDir: '', compression: 'lzw', icc: 'srgb' });
   const [rec, setRec] = useState({
@@ -114,6 +118,10 @@ export default function App() {
     // 切回原图的输出目录也在主进程算好（默认 = 导出父目录旁边的「切回原图」）
     setRec((r) => ({ ...r, outDir: i.recoverDir || i.settings?.recoverDir || i.home }));
     setSys(i.plan ?? null);
+    setPaths({
+      defaultRecoverDir: i.defaultRecoverDir ?? '',
+      recoverSubdir: i.recoverSubdir ?? '切回原图',
+    });
     if (i.demoFiles?.length && !bootRef.current) {
       bootRef.current = true;
       setTimeout(() => demoBoot(i.demoFiles), 120);
@@ -488,6 +496,9 @@ export default function App() {
 
   const pickReturned = useCallback(async () => loadReturned(await pc.pickReturned()), [loadReturned]);
 
+  /** 打开一个目录 —— 「我的文件去哪了」最可靠的答案就是直接把访达打开给他看 */
+  const openDir = useCallback((p) => { if (p) pc.openPath(p); }, []);
+
   const recover = useCallback(async () => {
     const files = (rec.plan?.rows ?? []).filter((r) => r.ok).map((r) => r.file);
     if (!files.length) return;
@@ -503,6 +514,7 @@ export default function App() {
         (rep.warnings.length ? `\n⚠️ ${rep.warnings.join('；')}` : ''),
         bad || rep.warnings.length ? 'err' : 'ok', 14000);
       setMessage(`已切回 ${rep.outputs} 张`);
+      setLastRec({ dir: rec.outDir, count: rep.outputs, at: new Date().toISOString(), failed: bad });
       setLibrary(await pc.library());
     } catch (e) {
       toast('切分失败', e.message, 'err');
@@ -633,6 +645,10 @@ export default function App() {
           onPickOutDir={async () => { const d = await pc.pickFolder('选择切回原图的输出位置'); if (d) { setRec((v) => ({ ...v, outDir: d })); await pc.setSettings({ recoverDir: d }); } }}
           onResetOutDir={async () => { setRec((v) => ({ ...v, outDir: '' })); const st = await pc.setSettings({ recoverDir: '' }); if (st?.recoverDir) setRec((v) => ({ ...v, outDir: st.recoverDir })); }}
           onScanExport={scanExport}
+          onOpenDir={openDir}
+          lastRec={lastRec}
+          defaultRecoverDir={paths.defaultRecoverDir}
+          recoverSubdir={paths.recoverSubdir}
           onClearLibrary={clearLibrary}
           library={library} onForget={forget} onReveal={pc.reveal} onReuseBatch={reuseBatch}
           sys={sys} onSetJobs={setJobs}

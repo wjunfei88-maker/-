@@ -23,9 +23,17 @@ export default function Inspector(p) {
     allowRotate, setAllowRotate, rotCount, capacity, canvasCount, maxPerCanvas,
     exp, setExp, onCompose, onComposeAll, busy,
     rec, setRec, onRecover, onPickReturned, onPickOutDir, recoverDir, onResetOutDir,
-    onScanExport, onClearLibrary,
+    onScanExport, onClearLibrary, onOpenDir, lastRec, defaultRecoverDir, recoverSubdir,
     library, onForget, onReveal, onReuseBatch, sys, onSetJobs,
   } = p;
+
+  // 用户以前手选过一个自定义目录时，「默认」和「当前」就不一样了 —— 必须显眼地说出来
+  const customOutDir = !!(rec.outDir && defaultRecoverDir && rec.outDir !== defaultRecoverDir);
+  // 路径太长会被截断，而最要紧的恰恰是最后那一段目录名，所以保留「…/最后两段」
+  const shortDir = (p) => {
+    const parts = String(p || '').split('/').filter(Boolean);
+    return parts.length <= 2 ? String(p || '') : `…/${parts.slice(-2).join('/')}`;
+  };
 
   const over = canvas.width > 12000 || canvas.height > 12000;
   const blocked = over || problems.length > 0 || !items.length;
@@ -200,7 +208,9 @@ export default function Inspector(p) {
           </Field>
           <Field label="保存到">
             <div className="path-pick">
-              <input className="input" value={exp.outDir} readOnly placeholder="选择位置…" />
+              <span className="path-view" title={exp.outDir}>{exp.outDir || '还没选位置'}</span>
+              <button className="btn sm" onClick={() => onOpenDir(exp.outDir)} disabled={!exp.outDir}
+                title="在访达里打开这个文件夹">打开</button>
               <button className="btn sm" onClick={exp.onPickDir}>更改…</button>
             </div>
           </Field>
@@ -326,18 +336,36 @@ export default function Inspector(p) {
             </>
           )}
 
-          <Field label="输出到">
+          <Field label={<span>输出到{customOutDir && <em className="tag-custom">自定义位置</em>}</span>}>
             <div className="path-pick">
-              <input className="input" value={rec.outDir} readOnly placeholder="选择文件夹…" />
+              <span className="path-view" title={rec.outDir}>{rec.outDir || '还没选位置'}</span>
+              <button className="btn sm" onClick={() => onOpenDir(rec.outDir)} disabled={!rec.outDir}
+                title="在访达里打开这个文件夹">打开</button>
               <button className="btn sm" onClick={onPickOutDir}>更改…</button>
             </div>
           </Field>
           <div className="hint">
-            和导出一样自带一个文件夹，切回来的原图有地方放，不用每次手选。
-            {String(rec.outDir || '').includes('切回原图') && (
-              <> 想改回默认可以 <button className="link-btn" onClick={onResetOutDir}>恢复默认位置</button>。</>
+            {customOutDir ? (
+              <>
+                现在切回来的原图会放进上面那个文件夹（<span className="mono">{shortDir(rec.outDir)}</span>），
+                <strong>不是你导出的那个目录</strong>。默认位置是
+                <span className="mono"> {defaultRecoverDir}</span>——
+                想改回去点 <button className="link-btn" onClick={onResetOutDir}>恢复默认位置</button>。
+              </>
+            ) : (
+              <>
+                和导出一样自带一个 <span className="mono">{recoverSubdir || '切回原图'}/</span> 文件夹，
+                就在导出目录旁边，切回来的原图有地方放，不用每次手选。
+              </>
             )}
           </div>
+          {lastRec?.dir && (
+            <div className="last-out">
+              上次切回 <b>{lastRec.count}</b> 张 →&nbsp;
+              <span className="mono" title={lastRec.dir}>{shortDir(lastRec.dir)}</span>
+              <button className="link-btn" onClick={() => onOpenDir(lastRec.dir)}>打开文件夹</button>
+            </div>
+          )}
           <div className="row2">
             <Field label="输出格式">
               <select className="select" value={rec.format} onChange={(e) => setRec({ ...rec, format: e.target.value })}>

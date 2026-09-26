@@ -14,7 +14,7 @@ import exifReader from 'exif-reader';
 import { planGroups, packCanvas, assertNoOverlap, capacityExplain } from '../main/services/layout.mjs';
 import { composeCanvas } from '../main/services/render.mjs';
 import { splitCanvas } from '../main/services/split.mjs';
-import { extractExif, stripThumbnail, injectExif, hasExif, normalizeOrientation } from '../main/services/exif.mjs';
+import { extractExif, stripThumbnail, injectExif, hasExif, normalizeOrientation, copyExifBetweenFiles } from '../main/services/exif.mjs';
 import { probeImage } from '../main/services/library.mjs';
 import { findManifestFor, planRecover, scanDirForCanvases } from '../main/services/recover.mjs';
 import { pruneSession, sessionPayload } from '../main/services/session.mjs';
@@ -136,6 +136,18 @@ H('③ EXIF 搬运（含摘除内嵌缩略图）');
   ok(readBack.Image?.Model === 'EOS R5', '注入后能读回 Model', readBack.Image?.Model);
   ok(readBack.Photo?.LensModel?.includes('RF24-70'), '镜头信息保真', readBack.exif?.LensModel);
   ok(injected.length > plain.length, '文件变大（EXIF 段已插入）', `${plain.length} → ${injected.length}`);
+
+  // 「原图本来就没有 EXIF」和「搬失败了」必须能分开 ——
+  // 否则用户会收到一条「6 张没能搬回 EXIF」的假警告（他的截图里就有一条，其实源图根本没 EXIF）
+  const noExifSrc = path.join(TMP, 'no-exif-src.jpg');
+  const noExifDst = path.join(TMP, 'no-exif-dst.jpg');
+  fs.writeFileSync(noExifSrc, plain);
+  const copyOut = await sharp({ create: { width: 10, height: 10, channels: 3, background: { r: 1, g: 1, b: 1 } } })
+    .jpeg().toFile(noExifDst).then(() => noExifDst);
+  const r = await copyExifBetweenFiles(noExifSrc, copyOut);
+  ok(r === null, '源图没有 EXIF 时返回 null（没东西可搬 ≠ 搬失败）', String(r));
+  const rMissing = await copyExifBetweenFiles(path.join(TMP, '根本没有这个文件.jpg'), copyOut);
+  ok(rMissing === false, '真的读不到文件时返回 false（这才是失败）', String(rMissing));
 }
 
 // ─────────────────────── 4. 合成 ───────────────────────

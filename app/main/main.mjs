@@ -14,7 +14,8 @@ import { splitCanvas } from './services/split.mjs';
 import { findManifestFor, planRecover, scanDirForCanvases } from './services/recover.mjs';
 import { pruneSession, sessionPayload } from './services/session.mjs';
 import {
-  EXPORT_SUBDIR as SETTINGS_SUBDIR, normalizeSettings, cleanPatch, exportDirOf, recoverDirOf,
+  EXPORT_SUBDIR as SETTINGS_SUBDIR, RECOVER_SUBDIR,
+  normalizeSettings, cleanPatch, exportDirOf, recoverDirOf,
 } from './services/settings.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
@@ -76,6 +77,10 @@ function settingsView() {
     settings,
     exportDir: exportDirOf(settings),
     recoverDir: recoverDirOf(settings),
+    // 「默认」和「当前」要分开报给界面：用户曾经手选过一个自定义目录时，
+    // 界面必须能看出来「这不是默认位置」—— 否则切回完他会去默认位置找，然后以为没切出来。
+    defaultRecoverDir: path.join(settings.exportParent, RECOVER_SUBDIR),
+    recoverSubdir: RECOVER_SUBDIR,
     subdir: EXPORT_SUBDIR,
     plan: {
       export: exportConcurrency([], settings.exportJobs),

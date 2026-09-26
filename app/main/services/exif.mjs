@@ -131,7 +131,8 @@ export async function copyExifBetweenFiles(srcFile, destFile) {
     const dest = fs.readFileSync(destFile);
     if (src.readUInt16BE(0) !== SOI || dest.readUInt16BE(0) !== SOI) return false;
     const exif = extractExif(src);
-    if (!exif) return false;
+    // null = 原图本来就没有 EXIF，没东西可搬 —— 这不是失败，别拿它吓用户
+    if (!exif) return null;
     // 摘缩略图 + 朝向归一（像素已经在导入时摆正了，绝不能再让看图软件转第二次）
     const cleaned = normalizeOrientation(stripThumbnail(exif), 1);
     fs.writeFileSync(destFile, injectExif(dest, cleaned));

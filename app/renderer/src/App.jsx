@@ -35,6 +35,7 @@ export default function App() {
   const [library, setLibrary] = useState({ batches: [] });
   const [message, setMessage] = useState('就绪');
   const [capacity, setCapacity] = useState(null);
+  const [sys, setSys] = useState(null);   // 这台机器打算用几个进程/几路并发（app:info 给的）
 
   const [exp, setExp] = useState({ name: 'batch', outDir: '', compression: 'lzw', icc: 'srgb' });
   const [rec, setRec] = useState({
@@ -110,6 +111,7 @@ export default function App() {
   useEffect(() => pc.info().then((i) => {
     setExp((e) => ({ ...e, outDir: i.home + '/像素拼图输出' }));
     setRec((r) => ({ ...r, outDir: i.home + '/像素拼图输出/切回' }));
+    setSys(i.plan ?? null);
     if (i.demoFiles?.length && !bootRef.current) {
       bootRef.current = true;
       setTimeout(() => demoBoot(i.demoFiles), 120);
@@ -403,7 +405,6 @@ export default function App() {
   }, [toast]);
 
   const pickReturned = useCallback(async () => loadReturned(await pc.pickReturned()), [loadReturned]);
-  const pickReturnedDir = useCallback(async () => loadReturned(await pc.pickReturnedDir()), [loadReturned]);
 
   const recover = useCallback(async () => {
     const files = (rec.plan?.rows ?? []).filter((r) => r.ok).map((r) => r.file);
@@ -529,9 +530,10 @@ export default function App() {
           exp={{ ...exp, onPickDir: async () => { const d = await pc.pickFolder('选择合成图保存位置'); if (d) setExp((v) => ({ ...v, outDir: d })); } }}
           setExp={setExp} onCompose={compose} onComposeAll={composeAll} busy={busy}
           rec={rec} setRec={setRec} onRecover={recover}
-          onPickReturned={pickReturned} onPickReturnedDir={pickReturnedDir}
+          onPickReturned={pickReturned}
           onPickOutDir={async () => { const d = await pc.pickFolder('选择切分输出位置'); if (d) setRec((v) => ({ ...v, outDir: d })); }}
           library={library} onForget={forget} onReveal={pc.reveal} onReuseBatch={reuseBatch}
+          sys={sys}
         />
       </div>
 

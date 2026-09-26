@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, net, shell, nativeTheme } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, protocol, net, shell, nativeTheme, utilityProcess } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -8,13 +8,17 @@ import { probeImage, makeThumb, shortId, IMAGE_EXT } from './services/library.mj
 
 const sharpMeta = (f) => sharpLib(f, { unlimited: true }).metadata();
 import { planGroups, packCanvas, CANVAS_LIMIT, capacityHint, capacityExplain } from './services/layout.mjs';
-import { composeCanvas, makeCanvasPreview } from './services/render.mjs';
+import { renderCanvas, makeBaseName } from './services/export.mjs';
+import { exportConcurrency, splitConcurrency, createLimiter } from './services/pool.mjs';
 import { splitCanvas } from './services/split.mjs';
 import { findManifestFor, planRecover } from './services/recover.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const DEV_URL = process.env.VITE_DEV_SERVER_URL;
 const isDev = !!DEV_URL;
+
+/** 「全部导出」的 worker 入口（每个进程负责一张画布） */
+const EXPORT_WORKER = path.join(import.meta.dirname, 'workers/export-worker.mjs');
 
 let win = null;
 
@@ -58,6 +62,7 @@ ipcMain.handle('app:info', () => {
     home: app.getPath('pictures'),
     limit: CANVAS_LIMIT,
     demoFiles,
+    plan: { export: exportConcurrency(), split: splitConcurrency() },
   };
 });
 
@@ -73,7 +78,10 @@ ipcMain.handle('dialog:pickImages', async () => {
 
 ipcMain.handle('dialog:pickFolder', async (_e, title = '选择文件夹') => {
   const r = await dialog.showOpenDialog(win, {
-    title, defaultPath: app.getPath('pictures'), properties: ['openFolder', 'createDirectory'],
+    title, defaultPath: app.getPath('pictures'),
+    // 必须是 openDirectory —— 写 openFolder 是无效值，Electron 会忽略它，
+    // 结果就是"什么都没法选、右下角按钮一直灰着"，用户根本换不了保存位置。
+    properties: ['openDirectory', 'createDirectory'],
   });
   return r.canceled ? null : r.filePaths[0];
 });
@@ -102,23 +110,6 @@ ipcMain.handle('dialog:pickReturned', async () => {
     ],
   });
   return r.canceled ? [] : r.filePaths;
-});
-
-/** 直接选一整个文件夹，自动把里面所有成片都算进来（连文件名都不用挑） */
-ipcMain.handle('dialog:pickReturnedDir', async () => {
-  const r = await dialog.showOpenDialog(win, {
-    title: '选择像素蛋糕导出的整个文件夹',
-    defaultPath: app.getPath('pictures'),
-    properties: ['openFolder'],
-  });
-  if (r.canceled || !r.filePaths[0]) return [];
-  const dir = r.filePaths[0];
-  try {
-    return fs.readdirSync(dir)
-      .filter((f) => RETURN_EXT.includes(path.extname(f).slice(1).toLowerCase()))
-      .map((f) => path.join(dir, f))
-      .sort();
-  } catch { return []; }
 });
 
 /** 导入：探测尺寸 + 生成缩略图 */
@@ -183,24 +174,11 @@ ipcMain.handle('layout:capacity', (_e, images, opts = {}) => {
 });
 
 /**
- * 导出**一张**画布：合成 TIFF + 写 manifest + 生成预览 + 记进历史批次。
- * 批量导出就是把它按顺序调 N 次（每张画布 = 像素蛋糕的一次额度）。
+ * 写 manifest + 记历史批次。**只有主进程做这件事** ——
+ * 导出 worker 是独立进程，让它们同时写 library.json 会互相覆盖。
  */
-async function exportOne(payload, { suffix = '' } = {}) {
-  const { items, width, height, gutter, name, outDir, icc, compression } = payload;
-  if (!items?.length) throw new Error('画布上还没有图片');
-  fs.mkdirSync(outDir, { recursive: true });
-  const id = shortId(6);
-  const safe = (name || 'batch').replace(/[/\\:*?"<>|]/g, '_');
-  const base = `TILE_${safe}_${id}${suffix}`;
-  const canvasFile = path.join(outDir, `${base}.tif`);
-
-  const started = Date.now();
-  const res = await composeCanvas({
-    items, width, height, gutter,
-    outFile: canvasFile, icc: icc || 'srgb', compression: compression || 'lzw',
-    onProgress: (p) => send('progress', p),
-  });
+function recordExport({ payload, id, safe, base, outDir, canvasFile, previewFile, bytes, timings, elapsed }) {
+  const { items, width, height, gutter } = payload;
 
   const manifest = {
     version: 2, id, name: safe, createdAt: new Date().toISOString(),
@@ -217,14 +195,11 @@ async function exportOne(payload, { suffix = '' } = {}) {
   const manifestFile = path.join(outDir, `${base}.manifest.json`);
   fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
 
-  const previewFile = path.join(outDir, `${base}.preview.jpg`);
-  await makeCanvasPreview(canvasFile, previewFile, 1400);
-
   const entry = {
     id, name: safe, createdAt: manifest.createdAt,
     canvasFile, manifestFile, previewFile,
     canvas: { width, height }, count: items.length,
-    bytes: res.bytes, elapsed: Date.now() - started,
+    bytes, elapsed, timings,
   };
   const lib = readLibrary();
   lib.batches.unshift(entry);
@@ -238,31 +213,180 @@ async function exportOne(payload, { suffix = '' } = {}) {
   };
 }
 
+/**
+ * 导出**一张**画布（在主进程里直接跑）：合成 TIFF + 写 manifest + 生成预览 + 记进历史批次。
+ * 「全部导出」走的是 worker 进程版本，见 export:composeAll。
+ */
+async function exportOne(payload, { suffix = '', onProgress } = {}) {
+  const { items, name, outDir } = payload;
+  if (!items?.length) throw new Error('画布上还没有图片');
+  fs.mkdirSync(outDir, { recursive: true });
+  const id = shortId(6);
+  const safe = (name || 'batch').replace(/[/\\:*?"<>|]/g, '_');
+  const base = makeBaseName(name, id, suffix);
+  const r = await renderCanvas({
+    payload, base,
+    onProgress: onProgress ?? ((p) => send('progress', p)),
+  });
+  return recordExport({ payload, id, safe, base, outDir, ...r });
+}
+
 /** 导出合成图 + manifest */
 ipcMain.handle('export:compose', (_e, payload) => exportOne(payload));
 
 /**
+ * 在**独立进程**里跑一张画布。
+ *
+ * 为什么值得开进程：libvips 的 TIFF/JPEG 编码是单线程的（实测并行度 1.06×），
+ * 一张画布再优化也只吃一个核。多开几个进程 = 把每张画布的压缩摊到多个核上。
+ * 内存不够的机器 exportConcurrency() 会给出 1，那时退回主进程内顺序跑，行为跟以前完全一样。
+ */
+function runOneInWorker({ job, total, onProgress }) {
+  return new Promise((resolve) => {
+    let child;
+    let settled = false;
+    const finish = (v) => {
+      if (settled) return;
+      settled = true;
+      try { child?.kill(); } catch { /* 进程可能已经退了 */ }
+      resolve(v);
+    };
+
+    try {
+      child = utilityProcess.fork(EXPORT_WORKER, [], { serviceName: 'pixcake-export' });
+    } catch (e) {
+      resolve({ ok: false, error: `无法启动导出进程：${e.message}` });
+      return;
+    }
+
+    child.on('message', (m) => {
+      if (m?.type === 'progress') {
+        onProgress({ index: job.index, total, progress: m.progress });
+      } else if (m?.type === 'done') {
+        finish({ ok: true, result: m.result });
+      } else if (m?.type === 'error') {
+        finish({ ok: false, error: m.error });
+      }
+    });
+    child.on('exit', (code) => {
+      if (!settled) finish({ ok: false, error: `导出进程异常退出（退出码 ${code}）` });
+    });
+
+    child.postMessage({
+      jobId: job.index,
+      payload: job.payload,
+      base: job.base,
+      panelConcurrency: job.panelConcurrency,
+    });
+  });
+}
+
+/**
  * 全部导出：一次把所有画布都产出（每张 = 一个 TIFF + 一个 manifest）。
- * 10 张照片分成 5 张画布时，不用手点 5 次。
+ * 8 张画布 = 点一次。并行的进程数由内存和核数决定，低配 Mac 自动降到 1。
  */
 ipcMain.handle('export:composeAll', async (_e, payload) => {
   const { canvases = [], ...rest } = payload;
+  if (!canvases.length) return { total: 0, done: [], failed: [], workers: 0 };
+  fs.mkdirSync(rest.outDir, { recursive: true });
+
+  const jobs = canvases.map((c, i) => {
+    const id = shortId(6);
+    const suffix = canvases.length > 1 ? `_c${String(i + 1).padStart(2, '0')}` : '';
+    return {
+      index: i, id, suffix,
+      safe: (rest.name || 'batch').replace(/[/\\:*?"<>|]/g, '_'),
+      base: makeBaseName(rest.name, id, suffix),
+      payload: { ...rest, ...c },
+    };
+  });
+
+  const plan = exportConcurrency(canvases.map((c) => ({ width: c.width, height: c.height })));
+  // 多个进程同时开时，每个进程内部的解码并行度要收着点，否则 3 个进程 × 4 线程会把内存打满
+  const perPanel = Math.max(1, Math.floor(plan.cores / plan.workers));
+  for (const j of jobs) j.panelConcurrency = perPanel;
+
   const done = [];
   const failed = [];
-  for (let i = 0; i < canvases.length; i++) {
+  const active = new Map();   // index → 该画布内部的进度 0..1
+
+  const broadcast = (extra, current) => {
+    const finished = done.length + failed.length;
+    let sum = 0;
+    for (const v of active.values()) sum += v;
+    const pct = Math.min(1, (finished + sum) / jobs.length);
+    send('progress', {
+      stage: 'batch', pct,
+      message: current
+        ? `第 ${current.index + 1}/${jobs.length} 张画布 · ${current.progress.message}`
+        : `共 ${jobs.length} 张画布，已完成 ${finished} 张`,
+      timings: current?.progress.timings ?? [],
+      workers: plan.workers,
+      finished, total: jobs.length,
+      ...extra,
+    });
+  };
+
+  const useWorkers = plan.workers > 1 && jobs.length > 1;
+  broadcast({ title: `并行 ${plan.workers} 个进程（${plan.reason}）` }, null);
+
+  const finalize = (job, r) => {
+    active.delete(job.index);
     try {
-      send('progress', {
-        stage: 'batch', pct: i / canvases.length,
-        message: `正在导出第 ${i + 1} / ${canvases.length} 张画布…`,
-      });
-      const suffix = canvases.length > 1 ? `_c${String(i + 1).padStart(2, '0')}` : '';
-      done.push({ index: i, ...(await exportOne({ ...rest, ...canvases[i] }, { suffix })) });
+      const entry = recordExport({ payload: job.payload, id: job.id, safe: job.safe, base: job.base, outDir: rest.outDir, ...r });
+      done.push({ index: job.index, ...entry });
     } catch (e) {
-      failed.push({ index: i, error: e.message });
+      failed.push({ index: job.index, error: e.message });
     }
+  };
+
+  if (!useWorkers) {
+    // 顺序跑（内存吃紧的机器），行为和 v3 一样，只是多了阶段耗时
+    for (const job of jobs) {
+      try {
+        const r = await renderCanvas({
+          payload: job.payload, base: job.base,
+          panelConcurrency: perPanel,
+          onProgress: (p) => {
+            active.set(job.index, p.pct ?? 0);
+            broadcast({}, { index: job.index, progress: p });
+          },
+        });
+        finalize(job, r);
+      } catch (e) {
+        active.delete(job.index);
+        failed.push({ index: job.index, error: e.message });
+      }
+    }
+  } else {
+    const queue = [...jobs];
+    const worker = async () => {
+      for (;;) {
+        const job = queue.shift();
+        if (!job) return;
+        const r = await runOneInWorker({
+          job, total: jobs.length,
+          onProgress: ({ progress }) => {
+            active.set(job.index, progress.pct ?? 0);
+            broadcast({}, { index: job.index, progress });
+          },
+        });
+        if (r.ok) {
+          finalize(job, r.result);
+          // 关键：finalize 之后必须再广播一次。
+          // 否则"已完成 N/M"要等到下一张画布有进度时才更新 —— 最后一张永远追不上，
+          // 浮层会一直停在旧数字上（实测 3 张并行时曾停在 0/3）。
+          broadcast({}, null);
+        } else { active.delete(job.index); failed.push({ index: job.index, error: r.error }); broadcast({}, null); }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(plan.workers, jobs.length) }, worker));
   }
-  return { total: canvases.length, done, failed };
+
+  broadcast({ pct: 1 }, null);
+  return { total: jobs.length, done, failed, workers: useWorkers ? plan.workers : 1, plan };
 });
+
 
 /** 切回原图 */
 ipcMain.handle('recover:split', async (_e, payload) => {
@@ -271,6 +395,7 @@ ipcMain.handle('recover:split', async (_e, payload) => {
   const report = await splitCanvas({
     returnedFile, manifest, outDir,
     format: format || 'jpeg', quality: quality ?? 14, keepExif: keepExif !== false,
+    concurrency: splitConcurrency(),
     onProgress: (p) => send('progress', p),
   });
   const lib = readLibrary();
@@ -303,21 +428,38 @@ ipcMain.handle('recover:plan', (_e, { files = [] } = {}) => planRecover(files));
  */
 ipcMain.handle('recover:splitMany', async (_e, payload) => {
   const { files = [], outDir, format, quality, keepExif } = payload;
+  if (!files.length) return { total: 0, done: [], failed: [], outputs: 0, lossless: 0, warnings: [] };
+
+  // 一个**全局**闸门管住所有画布的所有刀，而不是每张画布各管各的：
+  // 画布有的 4 刀有的 2 刀，按文件加锁会在小画布上跑不满 CPU。
+  const concurrency = splitConcurrency();
+  const gate = createLimiter(concurrency);
+
   const done = [];
   const failed = [];
-  for (let i = 0; i < files.length; i++) {
-    const f = files[i];
+  let finishedFiles = 0;
+
+  await Promise.all(files.map(async (f, i) => {
+    const label = `第 ${i + 1}/${files.length} 张画布`;
     try {
       send('progress', {
-        stage: 'batch', pct: i / files.length,
-        message: `正在切回第 ${i + 1} / ${files.length} 张画布…（${path.basename(f)}）`,
+        stage: 'batch', pct: finishedFiles / files.length,
+        message: `${label} · 正在读成片…（${path.basename(f)}）`,
+        workers: concurrency, finished: finishedFiles, total: files.length,
       });
       const found = findManifestFor(f);
       if (!found) throw new Error('找不到配套的 .manifest.json');
       const report = await splitCanvas({
         returnedFile: f, manifest: found.manifest, outDir,
         format: format || 'jpeg', quality: quality ?? 14, keepExif: keepExif !== false,
-        onProgress: (p) => send('progress', p),
+        limiter: gate,
+        onProgress: (p) => {
+          send('progress', {
+            ...p,
+            message: `${label} · ${p.message}`,
+            workers: concurrency, finished: finishedFiles, total: files.length,
+          });
+        },
       });
       const lib = readLibrary();
       const b = lib.batches.find((x) => x.id === found.manifest.id);
@@ -327,13 +469,23 @@ ipcMain.handle('recover:splitMany', async (_e, payload) => {
         outputs: report.outputs.length,
         lossless: report.outputs.filter((o) => o.lossless).length,
         warnings: report.warnings,
+        timings: report.timings,
       });
     } catch (e) {
       failed.push({ index: i, file: f, name: path.basename(f), error: e.message });
     }
-  }
+    finishedFiles++;
+    send('progress', {
+      stage: 'batch', pct: finishedFiles / files.length,
+      message: `已切回 ${finishedFiles}/${files.length} 张画布`,
+      workers: concurrency, finished: finishedFiles, total: files.length,
+    });
+  }));
+
+  done.sort((a, b) => a.index - b.index);
+  failed.sort((a, b) => a.index - b.index);
   return {
-    total: files.length, done, failed,
+    total: files.length, done, failed, workers: concurrency,
     outputs: done.reduce((s, d) => s + d.outputs, 0),
     lossless: done.reduce((s, d) => s + d.lossless, 0),
     warnings: done.flatMap((d) => d.warnings ?? []),

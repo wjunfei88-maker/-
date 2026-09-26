@@ -17,6 +17,8 @@ import { splitCanvas } from '../main/services/split.mjs';
 import { extractExif, stripThumbnail, injectExif, hasExif, normalizeOrientation } from '../main/services/exif.mjs';
 import { probeImage } from '../main/services/library.mjs';
 import { findManifestFor, planRecover } from '../main/services/recover.mjs';
+import { exportConcurrency, splitConcurrency, createLimiter, mapLimit, delay, exportJobMB } from '../main/services/pool.mjs';
+import { renderCanvas, makeBaseName } from '../main/services/export.mjs';
 import {
   findFreeSpot, snapPosition, tightBounds, validateCanvas, tooClose, asRect, overlaps,
 } from '../renderer/src/lib/geom.js';
@@ -539,6 +541,133 @@ H('⑪ 批量切回：找对 .manifest.json（batch / batch2 不能串台）');
     '配不上的那一行给出人话原因', plan.rows.find((r) => !r.ok)?.reason);
   ok(plan.rows.find((r) => r.ok)?.file === tif('batch'),
     '配对结果带回原始文件路径（供后续切分）');
+}
+
+// ─────────────────────── 12. 并行：并发池 / 多进程那套的底座 ───────────────────────
+H('⑫ 并行：并发上限、低配机器自动降级、保序');
+
+{
+  // 低配机器必须自动降到 1 —— 8GB 的 MacBook 上同时导 3 张会把内存打满、陷入交换
+  const KEY = 'PC_JOBS';
+  const saved = process.env[KEY];
+  delete process.env[KEY];
+  const auto = exportConcurrency([{ width: 12000, height: 12000 }, { width: 12000, height: 12000 }]);
+  ok(auto.workers >= 1 && auto.workers <= 4, '自动算出的导出并行度在 1~4 之间', `workers=${auto.workers}`);
+  ok(auto.byMem >= 1 && auto.byCores >= 1, '内存和核数都参与了限制', `byMem=${auto.byMem} byCores=${auto.byCores}`);
+  ok(typeof auto.reason === 'string' && auto.reason.length > 0, '给得出一句人话解释为什么是这个数', auto.reason);
+  ok(splitConcurrency() >= 1, '切回并行度至少是 1', `split=${splitConcurrency()}`);
+
+  process.env[KEY] = '1';
+  ok(exportConcurrency()?.workers === 1, 'PC_JOBS=1 时导出强制串行（低配兜底 / 压测对照）');
+  ok(splitConcurrency() === 1, 'PC_JOBS=1 时切回也强制串行');
+  process.env[KEY] = '2';
+  ok(exportConcurrency()?.workers === 2 && splitConcurrency() === 2, 'PC_JOBS 能按用户意愿覆盖');
+  if (saved === undefined) delete process.env[KEY]; else process.env[KEY] = saved;
+
+  // 画布越大，估算的内存越多
+  ok(exportJobMB({ width: 12000, height: 12000 }) > exportJobMB({ width: 6000, height: 4000 }),
+    '大画布估的内存比小画布多',
+    `${exportJobMB({ width: 12000, height: 12000 })}MB vs ${exportJobMB({ width: 6000, height: 4000 })}MB`);
+}
+
+{
+  // 闸门：同时最多跑 size 个，且一个都不能漏
+  const gate = createLimiter(2);
+  let live = 0, peak = 0;
+  const done = [];
+  await Promise.all(Array.from({ length: 9 }, (_, i) => gate.run(async () => {
+    live++; peak = Math.max(peak, live);
+    await delay(12);
+    done.push(i);
+    live--;
+  })));
+  ok(peak <= 2, '并发闸门没有超过设定上限', `峰值 ${peak} / 上限 2`);
+  ok(done.length === 9, '闸门里的任务一个都没漏', `${done.length}/9`);
+  ok(gate.stats().size === 2 && gate.stats().active === 0 && gate.stats().pending === 0,
+    '闸门跑完后没有残留任务', JSON.stringify(gate.stats()));
+
+  // mapLimit 必须保序 —— 切回来的图要按 manifest 顺序摆，不能按谁先跑完
+  const out = await mapLimit([40, 5, 25, 1, 15], 3, async (ms, i) => { await delay(ms); return `#${i}`; });
+  ok(JSON.stringify(out) === JSON.stringify(['#0', '#1', '#2', '#3', '#4']),
+    'mapLimit 按输入顺序返回（快的任务不许插队）', out.join(' '));
+}
+
+{
+  // 预览图必须和成片分开放 —— 用户看到"合成图里混着一堆低画质 jpg"会以为导出坏了
+  const src = path.join(TMP, 'pv-a.jpg');
+  await sharp({ create: { width: 900, height: 600, channels: 3, background: { r: 30, g: 120, b: 90 } } })
+    .jpeg().toFile(src);
+  const probe = await probeImage(src);
+  const lay = packCanvas([{ id: 'a', ...probe }], { limit: 12000, gutter: 24 });
+  const outDir = path.join(TMP, 'pv-out');
+  const r = await renderCanvas({
+    payload: {
+      items: lay.placed.map((p) => ({ ...p, crop: { left: p.x, top: p.y, width: p.w, height: p.h } })),
+      width: lay.width, height: lay.height, gutter: 24, outDir, compression: 'lzw', icc: 'srgb',
+    },
+    base: 'TILE_pv_test',
+  });
+
+  ok(fs.readdirSync(outDir).sort().join(',') === 'TILE_pv_test.tif,预览图',
+    '输出目录里只有成片和「预览图」子目录（不混放 jpg）', fs.readdirSync(outDir).join(' '));
+  ok(fs.readdirSync(path.join(outDir, '预览图')).join(',') === 'TILE_pv_test.preview.jpg',
+    '预览小图收进 预览图/ 子目录', fs.readdirSync(path.join(outDir, '预览图')).join(' '));
+  ok(r.previewFile.includes('预览图'), '返回值里的预览图路径也在子目录里', r.previewFile);
+  ok(r.timings.length >= 3 && r.timings.every((t) => typeof t.ms === 'number' && t.ms >= 0),
+    '带回了每个阶段的真实耗时', r.timings.map((t) => `${t.label}:${t.ms}ms`).join(' '));
+  ok(r.timings.some((t) => t.label.includes('保护带')), '阶段里有独立的「保护带镜像」计时');
+
+  // 保护带重做后（原来一张图被整解码 4 次）像素结果必须一模一样
+  const direct = path.join(TMP, 'pv-direct.tif');
+  await composeCanvas({
+    items: lay.placed.map((p) => ({ source: p.source, probe: p.probe, crop: { left: p.x, top: p.y, width: p.w, height: p.h } })),
+    width: lay.width, height: lay.height, gutter: 24,
+    outFile: direct, icc: 'srgb', compression: 'lzw',
+  });
+  const a = await sharp(r.canvasFile).raw().toBuffer();
+  const b = await sharp(direct).raw().toBuffer();
+  ok(a.equals(b), 'renderCanvas 与 composeCanvas 产物逐像素一致', `${a.length} 字节`);
+}
+
+{
+  // 并行切分：结果必须和串行一模一样，且按 manifest 顺序返回（不能按完成顺序）
+  const cw = 1200, ch = 800;
+  const mkSrc = async (name, r, g, b) => {
+    const f = path.join(TMP, `par-${name}.jpg`);
+    await sharp({ create: { width: 900, height: 600, channels: 3, background: { r, g, b } } }).jpeg().toFile(f);
+    return { id: name, ...(await probeImage(f)) };
+  };
+  const imgs = [await mkSrc('p1', 200, 60, 60), await mkSrc('p2', 60, 200, 60), await mkSrc('p3', 60, 60, 200)];
+  const lay = packCanvas(imgs, { limit: 12000, gutter: 24 });
+  const canvasFile = path.join(TMP, 'par-canvas.tif');
+  await composeCanvas({
+    items: lay.placed.map((p) => ({ source: p.source, probe: p.probe, crop: { left: p.x, top: p.y, width: p.w, height: p.h } })),
+    width: lay.width, height: lay.height, gutter: 24, outFile: canvasFile, icc: 'srgb', compression: 'lzw',
+  });
+  const manifest = {
+    version: 2,
+    canvas: { width: lay.width, height: lay.height },
+    items: lay.placed.map((p) => ({
+      name: p.name, width: p.w, height: p.h, rotation: p.rotation ?? 0,
+      natural: p.natural, crop: { left: p.x, top: p.y, width: p.w, height: p.h }, source: p.source,
+    })),
+  };
+
+  const serial = await splitCanvas({ returnedFile: canvasFile, manifest, outDir: path.join(TMP, 'par-serial'), format: 'png', keepExif: false, limiter: createLimiter(1) });
+  const gate = createLimiter(4);
+  const par = await splitCanvas({ returnedFile: canvasFile, manifest, outDir: path.join(TMP, 'par-par'), format: 'png', keepExif: false, limiter: gate });
+
+  ok(par.outputs.length === serial.outputs.length && par.outputs.length === 3, '并行切出的张数和串行一致', `${par.outputs.length} 张`);
+  ok(par.outputs.map((o) => o.name).join(',') === serial.outputs.map((o) => o.name).join(','),
+    '并行切分保序（按 manifest 顺序，不是谁先跑完谁在前）', par.outputs.map((o) => o.name).join(' '));
+  let same = true;
+  for (let i = 0; i < serial.outputs.length; i++) {
+    if (!fs.readFileSync(par.outputs[i].file).equals(fs.readFileSync(serial.outputs[i].file))) same = false;
+  }
+  ok(same, '并行与串行的产物逐字节一致（并行只改快慢，不改像素）');
+  ok(par.outputs.every((o) => o.lossless), '并行切分仍然逐张判定为无损',
+    `${par.outputs.filter((o) => o.lossless).length}/${par.outputs.length}`);
+  ok(par.outputs.every((o) => typeof o.ms === 'number'), '每张切分都带回自己的耗时', par.outputs.map((o) => `${o.name}:${o.ms}ms`).join(' '));
 }
 
 // ─────────────────────── 结果 ───────────────────────

@@ -84,15 +84,62 @@ export function Toasts({ list, onDismiss }) {
   );
 }
 
+/** 秒表格式：<1s 显示毫秒，>=1s 显示秒（一位小数） */
+function fmtMs(ms) {
+  if (!ms && ms !== 0) return '';
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+/**
+ * 进度浮层。
+ * 不只转圈：把**真实阶段耗时**列出来 —— 用户抱怨过"芯片跑不满、不知道慢在哪"，
+ * 所以时间必须花在哪一步就显示哪一步（这些数字是后端 onProgress 里带出来的实测值，不是估的）。
+ */
 export function ProgressOverlay({ progress }) {
   if (!progress) return null;
   const pct = Math.round((progress.pct ?? 0) * 100);
+  const timings = progress.timings ?? [];
+  const slowest = timings.reduce((m, t) => (t.ms > (m?.ms ?? 0) ? t : m), null);
+
   return (
     <div className="progress-overlay">
       <div className="progress-box">
         <div className="p-msg">{progress.message || '处理中…'}</div>
         <div className="progress-track"><i style={{ width: `${pct}%` }} /></div>
-        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--txt-3)', fontFamily: 'var(--mono)' }}>{pct}%</div>
+
+        <div className="p-foot">
+          <span className="p-pct">{pct}%</span>
+          {progress.workers > 1 && (
+            <span className="p-workers">{progress.workers} 个进程并行
+              {progress.total > 1 ? ` · 已完成 ${progress.finished ?? 0}/${progress.total}` : ''}</span>
+          )}
+        </div>
+
+        {timings.length > 0 && (
+          <div className="p-timings">
+            {timings.map((t) => (
+              <div key={t.label} className={`p-t${t === slowest ? ' slow' : ''}`}>
+                <span className="p-tl">{t.label}</span>
+                <span className="p-tm">{fmtMs(t.ms)}</span>
+              </div>
+            ))}
+            {/* 还没跑完时明确说一句"后面还有" ——
+                否则中途会把"目前最慢的一步"说成瓶颈，而真正吃时间的编码那步还没报上来 */}
+            {pct < 100 && (
+              <div className="p-t running">
+                <span className="p-tl">进行中…</span>
+                <span className="p-tm">—</span>
+              </div>
+            )}
+            {slowest && timings.length > 1 && (
+              <div className="p-note">
+                {pct < 100
+                  ? `已完成的部分里，最慢的是「${slowest.label}」`
+                  : `最慢的一步是「${slowest.label}」，占了大部分时间`}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

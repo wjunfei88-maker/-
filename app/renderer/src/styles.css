@@ -432,6 +432,38 @@ input { user-select: text; }
 .progress-track { height: 5px; border-radius: 99px; background: rgba(0, 0, 0, 0.5); overflow: hidden; }
 .progress-track > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-hi)); border-radius: 99px; transition: width 220ms var(--ease); }
 
+/* 进度浮层底部：百分比 + 并行进程数 */
+.p-foot { display: flex; align-items: baseline; justify-content: space-between; margin-top: 9px; min-height: 14px; }
+.p-pct { font-size: 11px; color: var(--txt-3); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.p-workers { font-size: 10.5px; color: var(--txt-3); letter-spacing: 0.01em; }
+
+/* 真实阶段耗时：哪一步花了多久，如实列出来 */
+.p-timings {
+  margin-top: 14px; padding-top: 12px; border-top: 0.5px solid var(--line);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.p-t { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.p-tl { font-size: 11.5px; color: var(--txt-3); }
+.p-tm { font-size: 11.5px; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--txt-2); }
+/* 最慢的一步用香槟金点出来 —— 用户最想知道的就是"瓶颈在哪" */
+.p-t.slow .p-tl, .p-t.slow .p-tm { color: var(--accent); }
+/* 还在跑的那一步：占位行，不参与"最慢"比较 */
+.p-t.running .p-tl, .p-t.running .p-tm { color: var(--txt-3); opacity: 0.6; }
+@keyframes p-pulse { 0%, 100% { opacity: 0.6; } 50% { opacity: 0.95; } }
+.p-t.running { animation: p-pulse 1.4s ease-in-out infinite; }
+.p-note { margin-top: 3px; font-size: 10.5px; color: var(--txt-4, var(--txt-3)); opacity: 0.85; }
+
+/* 这台机器的并行能力（导出卡片里的一行说明） */
+.perf-note {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-top: 10px; padding: 8px 10px; border-radius: var(--r-sm);
+  background: var(--accent-dim); border: 0.5px solid var(--accent-line);
+  font-size: 11px; color: var(--txt-2);
+}
+.perf-note b { color: var(--accent); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.pn-dot { width: 5px; height: 5px; border-radius: 99px; background: var(--accent); flex: 0 0 auto; }
+.pn-sub { flex-basis: 100%; font-size: 10.5px; color: var(--txt-3); padding-left: 11px; }
+
 /* 数值微调 / 分段控件 */
 .nudge { display: inline-flex; align-items: center; background: var(--bg-input); border: 0.5px solid var(--line); border-radius: var(--r-sm); height: 26px; overflow: hidden; }
 .nudge input { width: 100%; background: none; border: none; text-align: right; padding: 0 6px; font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }

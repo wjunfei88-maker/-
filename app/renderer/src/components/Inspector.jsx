@@ -22,8 +22,8 @@ export default function Inspector(p) {
     items, canvas, hint, gutter, setGutter, problems, selectedId, onMove, onRemove,
     allowRotate, setAllowRotate, rotCount, capacity, canvasCount, maxPerCanvas,
     exp, setExp, onCompose, onComposeAll, busy,
-    rec, setRec, onRecover, onPickReturned, onPickReturnedDir, onPickOutDir,
-    library, onForget, onReveal, onReuseBatch,
+    rec, setRec, onRecover, onPickReturned, onPickOutDir,
+    library, onForget, onReveal, onReuseBatch, sys,
   } = p;
 
   const over = canvas.width > 12000 || canvas.height > 12000;
@@ -203,11 +203,15 @@ export default function Inspector(p) {
               <button className="btn sm" onClick={exp.onPickDir}>选择</button>
             </div>
           </Field>
+          <div className="hint" style={{ marginTop: -2 }}>
+            成片（<span className="mono">.tif</span> + <span className="mono">.manifest.json</span>）放在这个目录。
+            界面回显用的预览小图会自动收进子文件夹 <span className="mono">预览图/</span>，不用管它。
+          </div>
           <div className="row2">
             <Field label="格式">
               <select className="select" value={exp.compression} onChange={(e) => setExp({ ...exp, compression: e.target.value })}>
                 <option value="lzw">TIFF · LZW（推荐）</option>
-                <option value="none">TIFF · 不压缩</option>
+                <option value="none">TIFF · 不压缩（快很多，文件大几倍）</option>
                 <option value="deflate">TIFF · Deflate</option>
               </select>
             </Field>
@@ -240,6 +244,13 @@ export default function Inspector(p) {
               导出合成图
             </button>
           )}
+          {sys && (
+            <div className="perf-note" title="TIFF 压缩本身只用一个核，所以靠「同时导多张」把机器用满；内存不够时会自动降到 1。">
+              <span className="pn-dot" />
+              这台机器：<b>{sys.export.workers}</b> 个进程并行导出 · 切回 <b>{sys.split}</b> 路并行
+              <span className="pn-sub">{sys.export.reason}</span>
+            </div>
+          )}
           <div className="hint">
             导出 TIFF 后直接丢进像素蛋糕，修完**不要改文件名**导出到同一目录，再回来点「切回原图」。
           </div>
@@ -254,15 +265,13 @@ export default function Inspector(p) {
       <div className="insp-group">
         <div className="card">
           <Field label="像素蛋糕修完的成片">
-            <div className="btn-pair">
-              <button className="btn sm" onClick={onPickReturned}>选文件（可多选）</button>
-              <button className="btn sm" onClick={onPickReturnedDir}>选整个文件夹</button>
-            </div>
+            <button className="btn sm" style={{ width: '100%', justifyContent: 'center' }}
+              onClick={onPickReturned}>选文件（可多选）</button>
           </Field>
 
           {!rec.plan && (
             <div className="hint">
-              一次把这一批画布全选进来就行。<br />
+              一次把这一批画布全按住 ⌘/⇧ 多选进来就行。<br />
               成片旁边要有导出时生成的 <b>.manifest.json</b>，软件按文件名自动配对，不用自己对号。
             </div>
           )}

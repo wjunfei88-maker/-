@@ -6,7 +6,6 @@ contextBridge.exposeInMainWorld('pc', {
   pickFolder: (title) => ipcRenderer.invoke('dialog:pickFolder', title),
   pickFile: (title) => ipcRenderer.invoke('dialog:pickFile', title),
   pickReturned: () => ipcRenderer.invoke('dialog:pickReturned'),
-  pickReturnedDir: () => ipcRenderer.invoke('dialog:pickReturnedDir'),
   importImages: (paths) => ipcRenderer.invoke('images:import', paths),
   packLayout: (images, opts) => ipcRenderer.invoke('layout:pack', images, opts),
   planLayout: (images, opts) => ipcRenderer.invoke('layout:plan', images, opts),

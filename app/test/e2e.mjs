@@ -16,6 +16,7 @@ import { composeCanvas } from '../main/services/render.mjs';
 import { splitCanvas } from '../main/services/split.mjs';
 import { extractExif, stripThumbnail, injectExif, hasExif, normalizeOrientation } from '../main/services/exif.mjs';
 import { probeImage } from '../main/services/library.mjs';
+import { findManifestFor, planRecover } from '../main/services/recover.mjs';
 import {
   findFreeSpot, snapPosition, tightBounds, validateCanvas, tooClose, asRect, overlaps,
 } from '../renderer/src/lib/geom.js';
@@ -261,6 +262,17 @@ H('⑦ 排版 v2：混横竖装箱 · 可旋转 · 全局最少画布数');
 
   const r3 = packCanvas([mk('a', 7952, 5304), mk('b', 5304, 7952), mk('c', 5304, 7952)], { limit: 12000, gutter: 24 });
   ok(r3.placed.length === 2, 'A7R 42MP 混横竖也最多 2 张', `实际放下 ${r3.placed.length}`);
+
+  // 用户点名要的「回字形」：两张 33MP 横上下叠在左边、一张 33MP 竖贴在右上、
+  // 右下角再塞一张小竖图 —— 2 横 + 1 竖 + 1 小图刚好互扣成 11704×11704/10104。
+  // 这条是用户截图里他喜欢的那种排法，钉住它，别被后续算法调整弄丢。
+  const pin = packCanvas([mk('a', 7008, 4672), mk('b', 7008, 4672), mk('c', 4672, 7008), mk('d', 4608, 3072)],
+    { limit: 12000, gutter: 24 });
+  ok(pin.placed.length === 4, '回字形：2 张 33MP 横 + 1 张 33MP 竖 + 1 张小图能互扣进一张画布',
+    `${pin.width}×${pin.height} · ${pin.strategy}`);
+  ok(pin.width === 11704, '回字形宽度正好 7032+4672=11704（33MP 横竖互扣）', `${pin.width}`);
+  { let ov = false; try { assertNoOverlap(pin.placed); } catch { ov = true; } ok(!ov, '回字形摆放无重叠'); }
+  ok(pin.width <= 12000 && pin.height <= 12000, '回字形未超限');
 }
 
 {
@@ -286,6 +298,32 @@ H('⑦ 排版 v2：混横竖装箱 · 可旋转 · 全局最少画布数');
     '旋转的照片严格宽高互换（整数像素重排 = 无损）');
   ok(rot.canvases.every((c) => c.placed.every((p) => p.w * p.h === p.natural.width * p.natural.height)),
     '旋转没有改变像素总数');
+}
+
+{
+  // 用户真实批次（截图里那个）：25 张，33MP 横竖混 + 14MP 混。
+  // 画布张数 = 像素蛋糕扣费次数，所以这里卡的是**钱**：
+  // 每多出一张画布就是多付一次全额，而普通功能断言（不重叠/不超限）在退化时照样全绿。
+  const spec = { L33: 10, P33: 10, L14: 5 };
+  const size = { L33: [7008, 4672], P33: [4672, 7008], L14: [4608, 3072], P14: [3072, 4608] };
+  const batch = [];
+  for (const [k, n] of Object.entries(spec)) {
+    for (let i = 0; i < n; i++) batch.push(mk(`${k}_${i}`, size[k][0], size[k][1]));
+  }
+  ok(batch.length === 25, '构造出 25 张混尺寸真实批次');
+
+  const real = planGroups(batch, { limit: 12000, gutter: 24 });
+  ok(real.canvases.length <= real.lowerBound,
+    '25 张混尺寸排到理论下界（省钱的关键指标，退化时其它断言仍会全绿）',
+    `${real.canvases.length} 张画布 / 下界 ${real.lowerBound} · 省 ${(100 - real.canvases.length / 25 * 100).toFixed(0)}%`);
+  ok(real.canvases.reduce((s, c) => s + c.placed.length, 0) === 25, '25 张一张不丢');
+  ok(real.canvases.every((c) => c.width <= 12000 && c.height <= 12000), '每张画布都在像素蛋糕上限内');
+  { let bad = 0; for (const c of real.canvases) { try { assertNoOverlap(c.placed); } catch { bad++; } } ok(bad === 0, '每张画布都无重叠'); }
+
+  // 确定性：同一批照片两次排版必须给出同样的画布数（否则用户每次点「自动排版」成本都在跳）
+  const again = planGroups(batch, { limit: 12000, gutter: 24 });
+  ok(again.canvases.length === real.canvases.length,
+    '同一批照片重复排版结果稳定', `${real.canvases.length} → ${again.canvases.length}`);
 }
 
 {
@@ -457,6 +495,50 @@ function exifWith(orientation, make = 'Sony') {
     '搬回 EXIF 时朝向已归一到 1（否则访达/微信会再转一次，竖拍照片躺倒）', `Orientation=${oExif.Image?.Orientation ?? 1}`);
   ok(omd.width === pp.width && omd.height === pp.height, '输出像素尺寸与原图一致', `${omd.width}×${omd.height}`);
   ok(oExif.Image?.Make === 'Sony', '朝向归一后其它 EXIF 仍然保真', oExif.Image?.Make);
+}
+
+// ─────────────────────── 9. 批量切回：批次配对 ───────────────────────
+H('⑪ 批量切回：找对 .manifest.json（batch / batch2 不能串台）');
+
+{
+  const dir = path.join(TMP, 'recover');
+  fs.mkdirSync(dir, { recursive: true });
+  const mkm = (name, w, h, n) => {
+    const f = path.join(dir, `${name}.manifest.json`);
+    fs.writeFileSync(f, JSON.stringify({
+      version: 2, canvas: { width: w, height: h },
+      items: Array.from({ length: n }, (_, i) => ({ id: `i${i}`, name: `p${i}.jpg` })),
+    }));
+    return f;
+  };
+  // 故意造出互为前缀的批次名 —— 这正是只靠 startsWith 会翻车的地方
+  mkm('batch', 11300, 11546, 6);
+  mkm('batch2', 7952, 10632, 2);
+  mkm('batch-2', 9000, 9000, 3);
+  const tif = (n) => { const f = path.join(dir, `${n}.tif`); fs.writeFileSync(f, 'x'); return f; };
+
+  ok(findManifestFor(tif('batch'))?.manifest?.items?.length === 6,
+    'batch.tif 配到 batch.manifest.json', '6 项');
+  ok(findManifestFor(tif('batch2'))?.manifest?.items?.length === 2,
+    'batch2.tif 精确配到 batch2.manifest.json（不是前缀更短的 batch）', '2 项');
+  ok(findManifestFor(tif('batch-2'))?.manifest?.items?.length === 3,
+    'batch-2.tif 配到 batch-2.manifest.json', '3 项');
+  ok(findManifestFor(tif('batch2'))?.manifestFile.endsWith('batch2.manifest.json'),
+    '批次名互为前缀时按精确同名优先');
+
+  // 像素蛋糕保持原文件名，但也可能给个后缀；前缀兜底要能救回来
+  ok(findManifestFor(tif('batch_c01'))?.manifest?.items?.length === 6,
+    '成片带 _c01 后缀时靠前缀兜底配上', '6 项');
+  ok(findManifestFor(path.join(dir, 'nope.tif')) === null,
+    '旁边没有记录文件时返回 null（配不上就不切，绝不猜）');
+
+  const plan = planRecover([tif('batch'), path.join(dir, 'nope.tif'), tif('batch2')]);
+  ok(plan.total === 3 && plan.okCount === 2, '批量配对统计正确', `${plan.okCount}/${plan.total}`);
+  ok(plan.imageCount === 8, '统计出一次能切回多少张原图', `${plan.imageCount} 张`);
+  ok(plan.rows.find((r) => !r.ok)?.reason.includes('没找到配套'),
+    '配不上的那一行给出人话原因', plan.rows.find((r) => !r.ok)?.reason);
+  ok(plan.rows.find((r) => r.ok)?.file === tif('batch'),
+    '配对结果带回原始文件路径（供后续切分）');
 }
 
 // ─────────────────────── 结果 ───────────────────────

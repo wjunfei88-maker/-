@@ -22,7 +22,7 @@ export default function Inspector(p) {
     items, canvas, hint, gutter, setGutter, problems, selectedId, onMove, onRemove,
     allowRotate, setAllowRotate, rotCount, capacity, canvasCount, maxPerCanvas,
     exp, setExp, onCompose, onComposeAll, busy,
-    rec, setRec, onRecover, onPickReturned, onPickOutDir,
+    rec, setRec, onRecover, onPickReturned, onPickReturnedDir, onPickOutDir,
     library, onForget, onReveal, onReuseBatch,
   } = p;
 
@@ -246,24 +246,48 @@ export default function Inspector(p) {
         </div>
       </div>
 
-      {/* ── 切回原图 ── */}
-      <div className="section-head"><span className="section-title">切回原图</span></div>
+      {/* ── 切回原图（支持批量）── */}
+      <div className="section-head">
+        <span className="section-title">切回原图</span>
+        {rec.plan?.okCount > 0 && <span className="count-pill">{rec.plan.okCount}/{rec.plan.total}</span>}
+      </div>
       <div className="insp-group">
         <div className="card">
-          <Field label="像素蛋糕修完的文件">
-            <div className="path-pick">
-              <input className="input" value={rec.returnedFile || ''} readOnly placeholder="选择文件…" />
-              <button className="btn sm" onClick={onPickReturned}>选择</button>
+          <Field label="像素蛋糕修完的成片">
+            <div className="btn-pair">
+              <button className="btn sm" onClick={onPickReturned}>选文件（可多选）</button>
+              <button className="btn sm" onClick={onPickReturnedDir}>选整个文件夹</button>
             </div>
           </Field>
-          {rec.matched && (
-            <div className="hint ok" style={{ color: 'var(--ok)' }}>
-              已匹配到合成记录：{rec.matched.name} · {rec.matched.canvas.width}×{rec.matched.canvas.height} · {rec.matched.items.length} 张
+
+          {!rec.plan && (
+            <div className="hint">
+              一次把这一批画布全选进来就行。<br />
+              成片旁边要有导出时生成的 <b>.manifest.json</b>，软件按文件名自动配对，不用自己对号。
             </div>
           )}
-          {rec.returnedFile && !rec.matched && (
-            <div className="hint warn">在同目录下没找到对应的 .manifest.json，无法确定切分位置。</div>
+
+          {rec.plan && (
+            <>
+              <div className={`hint ${rec.plan.okCount ? '' : 'warn'}`}
+                style={rec.plan.okCount ? { color: 'var(--ok)' } : undefined}>
+                {rec.plan.okCount
+                  ? <>已配对 <b>{rec.plan.okCount}</b> 张画布 · 共可切回 <b>{rec.plan.imageCount}</b> 张原图
+                    {rec.plan.total > rec.plan.okCount ? `（${rec.plan.total - rec.plan.okCount} 个跳过）` : ''}</>
+                  : '这些文件旁边都没找到 .manifest.json，无法确定切分位置。'}
+              </div>
+              <div className="match-list">
+                {rec.plan.rows.map((r) => (
+                  <div key={r.file} className={`match-row${r.ok ? '' : ' bad'}`} title={r.file}>
+                    <span className="mr-dot" />
+                    <span className="mr-name">{r.name}</span>
+                    <span className="mr-meta">{r.ok ? `${r.count} 张` : '缺记录'}</span>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
+
           <Field label="输出到">
             <div className="path-pick">
               <input className="input" value={rec.outDir} readOnly placeholder="选择文件夹…" />
@@ -292,8 +316,8 @@ export default function Inspector(p) {
             把原图的 EXIF 搬回来（摘掉旧缩略图 + 朝向归一）
           </label>
           <button className="btn primary" style={{ width: '100%', justifyContent: 'center', height: 32 }}
-            onClick={onRecover} disabled={busy || !rec.returnedFile || !rec.matched}>
-            切回原图
+            onClick={onRecover} disabled={busy || !(rec.plan?.okCount > 0)}>
+            {(rec.plan?.okCount ?? 0) > 1 ? `全部切回（${rec.plan.imageCount} 张原图）` : '切回原图'}
           </button>
         </div>
       </div>

@@ -11,6 +11,7 @@
     "package": "npm run build && node scripts/package.mjs",
     "icon": "node scripts/make-icon.mjs",
     "test": "node app/test/e2e.mjs",
+    "bench": "node tools/layout-bench.mjs",
     "m0:gen": "node tools/m0-generate.mjs",
     "m0:cmp": "node tools/m0-compare.mjs"
   },

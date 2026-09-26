@@ -19,6 +19,7 @@ function withBounds(c) {
 const STRATEGY_LABEL = {
   shelf: '货架排布',
   binpack: '紧密装箱',
+  manual: '手工摆',
 };
 
 export default function App() {
@@ -37,7 +38,7 @@ export default function App() {
 
   const [exp, setExp] = useState({ name: 'batch', outDir: '', compression: 'lzw', icc: 'srgb' });
   const [rec, setRec] = useState({
-    returnedFile: null, matched: null, outDir: '', format: 'jpeg', quality: 14, keepExif: true,
+    files: [], plan: null, outDir: '', format: 'jpeg', quality: 14, keepExif: true,
   });
 
   const toast = useCallback((title, body, kind = 'ok', ttl = 5200) => {
@@ -149,9 +150,20 @@ export default function App() {
     if (!imgs?.length) return;
     const rot = opts.allowRotate ?? allowRotate;
     const gut = opts.gutter ?? gutter;
+
+    // 手工画布不参与自动排版：里面的照片被"钉住"，只重排剩下的，
+    // 排完再把手工作品原样接在后面 —— 免得点一下「自动排版」就把手摆的活全冲掉
+    const manual = (plan?.canvases ?? []).filter((c) => c.manual);
+    const pinned = new Set(manual.flatMap((c) => c.placed.map((p) => p.id)));
+    const free = imgs.filter((i) => !pinned.has(i.id));
+    if (!free.length) {
+      if (manual.length) toast('没有可自动排的照片', '照片都在手工画布里。想全部重排，先把手工画布里的照片拖出去。', 'err', 8000);
+      return;
+    }
+
     setBusy(true); setMessage('正在搜索最优排版…');
     try {
-      const r = await pc.planLayout(imgs.map((i) => ({
+      const r = await pc.planLayout(free.map((i) => ({
         id: i.id, name: i.name, path: i.path, width: i.width, height: i.height, format: i.format,
       })), { gutter: gut, allowRotate: rot });
 
@@ -159,35 +171,37 @@ export default function App() {
         toast('排不下', '这些照片单张就超过了 12000px 上限。', 'err');
         return;
       }
-      setPlan(r);
+      const combined = [...r.canvases, ...manual];
+      setPlan({ ...r, canvases: combined });
       setPlanIndex(0);
       setSelectedId(null);
-      pc.capacity(imgs, { gutter: gut }).then(setCapacity).catch(() => setCapacity(null));
+      pc.capacity(free, { gutter: gut }).then(setCapacity).catch(() => setCapacity(null));
 
-      const totalPlaced = r.canvases.reduce((s, c) => s + c.placed.length, 0);
-      const savedPct = Math.round((1 - r.canvases.length / Math.max(1, totalPlaced)) * 100);
-      const rotN = r.canvases.reduce((s, c) => s + c.placed.filter((p) => p.rotation === 90).length, 0);
+      const totalPlaced = combined.reduce((s, c) => s + c.placed.length, 0);
+      const savedPct = Math.round((1 - combined.length / Math.max(1, totalPlaced)) * 100);
+      const rotN = combined.reduce((s, c) => s + c.placed.filter((p) => p.rotation === 90).length, 0);
 
-      setMessage(r.canvases.length === 1
-        ? `排成 1 张画布 · ${r.canvases[0].placed.length} 张`
-        : `${totalPlaced} 张 → ${r.canvases.length} 张画布 · 省 ${savedPct}% 额度`);
+      setMessage(combined.length === 1
+        ? `排成 1 张画布 · ${combined[0].placed.length} 张`
+        : `${totalPlaced} 张 → ${combined.length} 张画布 · 省 ${savedPct}% 额度`);
 
-      if (r.canvases.length > 1) {
-        toast(`排成 ${r.canvases.length} 张画布`,
+      if (combined.length > 1) {
+        toast(`排成 ${combined.length} 张画布`,
           `${totalPlaced} 张照片装不进一张画布（单边上限 12000px），已按最少画布数自动分组。` +
           `每张画布对应像素蛋糕的一次额度，比一张张修省 ${savedPct}%。` +
+          (manual.length ? `\n其中 ${manual.length} 张是你手工摆的，没动。` : '') +
           (rotN ? `\n其中 ${rotN} 张被旋转 90° 以塞得更紧。` : ''), 'ok', 9000);
       } else if (rotN) {
         toast('排版完成', `其中 ${rotN} 张旋转 90° 以塞得更紧，切回原图时会自动转正。`, 'ok', 7000);
       }
 
       if (r.unplaceable.length) toast(`${r.unplaceable.length} 张无法处理`, '它们单边就超过了 12000px。', 'err');
-      const unplaced = imgs.length - totalPlaced - r.unplaceable.length;
+      const unplaced = free.length - r.canvases.reduce((s, c) => s + c.placed.length, 0) - r.unplaceable.length;
       if (unplaced > 0) toast('部分照片没排进去', `${unplaced} 张暂时放不下`, 'err');
     } catch (e) {
       toast('排版失败', e.message, 'err');
     } finally { setBusy(false); setProgress(null); }
-  }, [gutter, allowRotate, toast]);
+  }, [gutter, allowRotate, plan, toast]);
 
   const autoLayout = useCallback(() => layoutFor(images), [layoutFor, images]);
 
@@ -241,7 +255,7 @@ export default function App() {
       ...prev,
       canvases: prev.canvases
         .map((c) => withBounds({ ...c, placed: c.placed.filter((p) => p.id !== id) }))
-        .filter((c) => c.placed.length),
+        .filter((c) => c.placed.length || c.manual),     // 手工画布即使空了也留着
     } : prev));
   }, []);
 
@@ -250,14 +264,35 @@ export default function App() {
     setSelectedId(null); setCapacity(null); setMessage('已清空');
   }, []);
 
-  /** 从底片条拖一张到画布上 */
+  /** 新建一张空画布，照片自己往里面摆（不参与自动排版） */
+  const addCanvas = useCallback(() => {
+    const c = { placed: [], width: 0, height: 0, util: 0, strategy: 'manual', manual: true };
+    setPlan((prev) => {
+      const base = prev ?? { canvases: [], unplaceable: [], allowRotate, lowerBound: 0 };
+      return { ...base, canvases: [...base.canvases, c] };
+    });
+    setPlanIndex(canvases.length);          // 新画布追加在末尾，索引就是原来的张数
+    setSelectedId(null);
+    setMessage('新建了 1 张空画布 · 把左边底片拖进来');
+    toast('新建了 1 张空画布', '从左边底片条把照片拖到画布上，位置随你摆。', 'ok');
+  }, [canvases.length, allowRotate, toast]);
+
+  /** 删除一张空画布（有图的画布不给删，避免误点丢掉排版） */
+  const removeCanvas = useCallback((i) => {
+    if (!canvases[i] || canvases[i].placed.length) return;
+    setPlan((prev) => ({ ...prev, canvases: prev.canvases.filter((_, k) => k !== i) }));
+    setPlanIndex((k) => Math.max(0, k > i ? k - 1 : Math.min(k, canvases.length - 2)));
+    setMessage('已删除空画布');
+  }, [canvases]);
+
+  /** 从底片条拖一张到画布上（已经在别的画布上就是移动过来） */
   const addToCanvas = useCallback((id) => {
     const src = images.find((i) => i.id === id);
     if (!src) return;
     setPlan((prev) => {
       const c = prev?.canvases?.[planIndex];
       if (!c) return prev;
-      if (c.placed.some((p) => p.id === id)) { toast('这张已经在画布上了', '它是从别的画布拖过来的话，请先用「自动排版」重排。', 'err'); return prev; }
+      if (c.placed.some((p) => p.id === id)) { toast('这张已经在这张画布上了', '', 'err'); return prev; }
       const tb = tightBounds(c.placed);
       let x = c.placed.length ? tb.width + gutter : 0;
       let y = 0;
@@ -269,7 +304,15 @@ export default function App() {
         x: r.x, y: r.y, w: src.width, h: src.height, rotation: 0,
         natural: { width: src.width, height: src.height },
       }];
-      return { ...prev, canvases: prev.canvases.map((cc, i) => (i === planIndex ? withBounds({ ...cc, placed }) : cc)) };
+      // 同一张照片在一次导出里只能出现在一张画布上，所以从别处拖过来 = 从那张画布移走
+      const canvases = prev.canvases.map((cc, i) => {
+        if (i === planIndex) return withBounds({ ...cc, placed });
+        if (cc.placed.some((p) => p.id === id)) {
+          return withBounds({ ...cc, placed: cc.placed.filter((p) => p.id !== id) });
+        }
+        return cc;
+      });
+      return { ...prev, canvases };
     });
   }, [images, planIndex, gutter, toast]);
 
@@ -308,8 +351,9 @@ export default function App() {
     try {
       const r = await pc.compose({ ...toPayload(current), gutter, name: exp.name, outDir: exp.outDir, icc: exp.icc, compression: exp.compression });
       setLibrary(await pc.library());
-      setRec((v) => ({ ...v, matched: { name: r.name, canvas: r.canvas, items: current.placed.map((i) => ({ name: i.name })) }, manifestFile: r.manifestFile }));
-      toast('合成完成', `${r.canvas.width}×${r.canvas.height} · ${(r.bytes / 1024 / 1024).toFixed(0)}MB\n${r.canvasFile}`, 'ok', 9000);
+      toast('合成完成',
+        `${r.canvas.width}×${r.canvas.height} · ${(r.bytes / 1024 / 1024).toFixed(0)}MB\n${r.canvasFile}\n\n修完回来点「切回原图」，成片可以一次多选。`,
+        'ok', 11000);
       setMessage(`已导出 ${r.canvas.width}×${r.canvas.height}`);
     } catch (e) {
       toast('合成失败', e.message, 'err');
@@ -326,62 +370,68 @@ export default function App() {
         gutter, name: exp.name, outDir: exp.outDir, icc: exp.icc, compression: exp.compression,
       });
       setLibrary(await pc.library());
-      if (r.done.length) {
-        const first = r.done[0];
-        setRec((v) => ({
-          ...v,
-          matched: { name: first.name, canvas: first.canvas, items: canvases[0].placed.map((i) => ({ name: i.name })) },
-          manifestFile: first.manifestFile,
-        }));
-      }
       const totalMB = r.done.reduce((s, d) => s + d.bytes, 0) / 1024 / 1024;
       toast(`已导出 ${r.done.length} 张画布`,
-        `${r.done.length} 个 TIFF + manifest 已写到 ${exp.outDir}\n共 ${totalMB.toFixed(0)}MB` +
+        `${r.done.length} 个 TIFF + manifest 已写到 ${exp.outDir}\n共 ${totalMB.toFixed(0)}MB\n\n修完回来点「切回原图」→「选整个文件夹」，一次全部切回。` +
         (r.failed.length ? `\n⚠️ ${r.failed.length} 张失败：${r.failed[0].error}` : ''),
-        r.failed.length ? 'err' : 'ok', 10000);
+        r.failed.length ? 'err' : 'ok', 12000);
       setMessage(`已导出 ${r.done.length}/${r.total} 张画布`);
     } catch (e) {
       toast('批量导出失败', e.message, 'err');
     } finally { setBusy(false); setProgress(null); }
   }, [canvases, exp, gutter, guardExport, toast]);
 
-  // ── 切回原图 ──
-  const pickReturned = useCallback(async () => {
-    const f = await pc.pickFile('选择像素蛋糕修完导出的文件');
-    if (!f) return;
-    const found = await pc.findManifestFor(f);
-    setRec((v) => ({ ...v, returnedFile: f, matched: found?.manifest ?? null, manifestFile: found?.manifestFile ?? null }));
-    if (!found) toast('没找到合成记录', '同目录下需要有导出时生成的 .manifest.json', 'err');
+  // ── 切回原图（支持批量：一次选一整批，配对完一次全切回）──
+  /**
+   * 选定要切回的成片后先只做「配对」，不动像素：
+   * 让用户先看清楚哪几个能切、各能切出几张、哪个配不上记录，再决定要不要全切。
+   */
+  const loadReturned = useCallback(async (files) => {
+    if (!files || !files.length) return;
+    const p = await pc.recoverPlan(files);
+    setRec((v) => ({ ...v, files, plan: p }));
+    const bad = p.total - p.okCount;
+    if (!p.okCount) {
+      toast('没找到合成记录', '选中的文件旁边要有导出时生成的 .manifest.json', 'err', 9000);
+    } else if (bad) {
+      toast(`配对成功 ${p.okCount} / ${p.total}`,
+        `有 ${bad} 个文件旁边缺 .manifest.json，会被跳过。可切回 ${p.imageCount} 张原图。`, 'err', 9000);
+    } else {
+      toast(`已配对 ${p.okCount} 张画布`,
+        `共可切回 ${p.imageCount} 张原图${p.okCount > 1 ? '，点一下全部切回' : ''}。`, 'ok');
+    }
   }, [toast]);
 
+  const pickReturned = useCallback(async () => loadReturned(await pc.pickReturned()), [loadReturned]);
+  const pickReturnedDir = useCallback(async () => loadReturned(await pc.pickReturnedDir()), [loadReturned]);
+
   const recover = useCallback(async () => {
-    if (!rec.returnedFile || !rec.manifestFile) return;
-    setBusy(true); setMessage('正在切分…');
+    const files = (rec.plan?.rows ?? []).filter((r) => r.ok).map((r) => r.file);
+    if (!files.length) return;
+    setBusy(true); setMessage(`正在切回 ${files.length} 张画布…`);
     try {
-      const rep = await pc.split({
-        manifestFile: rec.manifestFile, returnedFile: rec.returnedFile,
-        outDir: rec.outDir, format: rec.format, quality: rec.quality, keepExif: rec.keepExif,
+      const rep = await pc.splitMany({
+        files, outDir: rec.outDir, format: rec.format, quality: rec.quality, keepExif: rec.keepExif,
       });
-      const lossless = rep.outputs.filter((o) => o.lossless).length;
-      toast(`切回 ${rep.outputs.length} 张`,
-        `无损 ${lossless} 张 · 输出到 ${rec.outDir}` +
+      const bad = rep.failed.length;
+      toast(`切回 ${rep.outputs} 张原图`,
+        `来自 ${rep.done.length} 张画布 · 无损 ${rep.lossless} 张 · 输出到 ${rec.outDir}` +
+        (bad ? `\n⚠️ ${bad} 张画布失败：${rep.failed.map((f) => f.name).join('、')}` : '') +
         (rep.warnings.length ? `\n⚠️ ${rep.warnings.join('；')}` : ''),
-        rep.warnings.length ? 'err' : 'ok', 9000);
-      setMessage(`已切回 ${rep.outputs.length} 张`);
+        bad || rep.warnings.length ? 'err' : 'ok', 14000);
+      setMessage(`已切回 ${rep.outputs} 张`);
+      setLibrary(await pc.library());
     } catch (e) {
       toast('切分失败', e.message, 'err');
     } finally { setBusy(false); setProgress(null); }
   }, [rec, toast]);
 
+  /** 从历史批次点进来：直接开文件选择 —— manifest 会自动按文件名配上，不用手动指 */
   const reuseBatch = useCallback(async (b) => {
-    setRec((v) => ({
-      ...v,
-      manifestFile: b.manifestFile,
-      matched: { name: b.name, canvas: b.canvas, items: new Array(b.count).fill({}) },
-      outDir: v.outDir || b.canvasFile.replace(/\/[^/]+$/, '/切回'),
-    }));
-    toast('已载入批次', `${b.name} · ${b.count} 张。把像素蛋糕导出的文件选进来即可切分。`);
-  }, [toast]);
+    setRec((v) => ({ ...v, outDir: v.outDir || b.canvasFile.replace(/\/[^/]+$/, '/切回') }));
+    toast('已载入批次', `${b.name} · ${b.count} 张。把像素蛋糕导出的成片选进来（可多选）。`);
+    await loadReturned(await pc.pickReturned());
+  }, [loadReturned, toast]);
 
   const forget = useCallback(async (id) => setLibrary(await pc.forget(id)), []);
 
@@ -429,7 +479,7 @@ export default function App() {
         onAutoLayout={autoLayout}
         onCompose={compose}
         onComposeAll={composeAll}
-        onRecover={() => (rec.returnedFile ? recover() : pickReturned())}
+        onRecover={() => ((rec.plan?.okCount ?? 0) > 0 ? recover() : pickReturned())}
         busy={busy}
         hasImages={images.length > 0}
         canCompose={items.length > 0 && !!exp.outDir}
@@ -452,11 +502,14 @@ export default function App() {
           <CanvasList
             canvases={canvases} index={planIndex} problems={canvasProblems} thumbs={thumbs}
             onSelect={gotoPlan}
+            onAddCanvas={images.length ? addCanvas : null}
+            onRemoveCanvas={removeCanvas}
           />
         </aside>
 
         <Stage
           items={items} canvas={canvas} gutter={gutter} limit={LIMIT}
+          draft={!items.length && !!current}
           selectedId={selectedId} onSelect={setSelectedId}
           onMove={moveItem} onRemove={removeItem}
           onDropFiles={addImages} onAddToCanvas={addToCanvas}
@@ -475,7 +528,8 @@ export default function App() {
           capacity={capacity} canvasCount={canvases.length} maxPerCanvas={maxPerCanvas}
           exp={{ ...exp, onPickDir: async () => { const d = await pc.pickFolder('选择合成图保存位置'); if (d) setExp((v) => ({ ...v, outDir: d })); } }}
           setExp={setExp} onCompose={compose} onComposeAll={composeAll} busy={busy}
-          rec={rec} setRec={setRec} onRecover={recover} onPickReturned={pickReturned}
+          rec={rec} setRec={setRec} onRecover={recover}
+          onPickReturned={pickReturned} onPickReturnedDir={pickReturnedDir}
           onPickOutDir={async () => { const d = await pc.pickFolder('选择切分输出位置'); if (d) setRec((v) => ({ ...v, outDir: d })); }}
           library={library} onForget={forget} onReveal={pc.reveal} onReuseBatch={reuseBatch}
         />

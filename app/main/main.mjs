@@ -10,6 +10,7 @@ const sharpMeta = (f) => sharpLib(f, { unlimited: true }).metadata();
 import { planGroups, packCanvas, CANVAS_LIMIT, capacityHint, capacityExplain } from './services/layout.mjs';
 import { composeCanvas, makeCanvasPreview } from './services/render.mjs';
 import { splitCanvas } from './services/split.mjs';
+import { findManifestFor, planRecover } from './services/recover.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const DEV_URL = process.env.VITE_DEV_SERVER_URL;
@@ -83,6 +84,41 @@ ipcMain.handle('dialog:pickFile', async (_e, title = '选择文件') => {
     filters: [{ name: 'TIFF', extensions: ['tif', 'tiff'] }, { name: '所有文件', extensions: ['*'] }],
   });
   return r.canceled ? null : r.filePaths[0];
+});
+
+// 像素蛋糕能导出的格式（切回时用户手里拿到的就是这些）
+const RETURN_EXT = ['tif', 'tiff', 'jpg', 'jpeg', 'png',
+  'arw', 'cr2', 'cr3', 'nef', 'nrw', 'raf', 'dng', 'orf', 'rw2', 'pef', 'srw'];
+
+/** 选择像素蛋糕修完导出的文件（可多选 → 一次切回一整批） */
+ipcMain.handle('dialog:pickReturned', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: '选择像素蛋糕修完导出的文件（可按住 ⌘ 或 ⇧ 多选）',
+    defaultPath: app.getPath('pictures'),
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: '修完的成片', extensions: RETURN_EXT },
+      { name: '所有文件', extensions: ['*'] },
+    ],
+  });
+  return r.canceled ? [] : r.filePaths;
+});
+
+/** 直接选一整个文件夹，自动把里面所有成片都算进来（连文件名都不用挑） */
+ipcMain.handle('dialog:pickReturnedDir', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: '选择像素蛋糕导出的整个文件夹',
+    defaultPath: app.getPath('pictures'),
+    properties: ['openFolder'],
+  });
+  if (r.canceled || !r.filePaths[0]) return [];
+  const dir = r.filePaths[0];
+  try {
+    return fs.readdirSync(dir)
+      .filter((f) => RETURN_EXT.includes(path.extname(f).slice(1).toLowerCase()))
+      .map((f) => path.join(dir, f))
+      .sort();
+  } catch { return []; }
 });
 
 /** 导入：探测尺寸 + 生成缩略图 */
@@ -252,19 +288,56 @@ ipcMain.handle('library:forget', (_e, id) => {
 });
 
 /** 从一个文件反查它的 sidecar manifest（用户直接把修完的图拖进来时用） */
-ipcMain.handle('manifest:findFor', (_e, file) => {
-  const dir = path.dirname(file);
-  const stem = path.basename(file).replace(/\.[^.]+$/, '');
-  const cands = fs.readdirSync(dir).filter((f) => f.endsWith('.manifest.json'));
-  for (const c of cands) {
+ipcMain.handle('manifest:findFor', (_e, file) => findManifestFor(file));
+
+/**
+ * 批量切回 · 第一步：先只做「配对」，不动像素。
+ * 让用户看清楚哪几个文件能切、各能切出几张、哪个配不上记录，再决定要不要全切。
+ * 配不上就**不动**，绝不猜 —— 猜错会把别人的画布切坏。
+ */
+ipcMain.handle('recover:plan', (_e, { files = [] } = {}) => planRecover(files));
+
+/**
+ * 批量切回 · 第二步：一次把所有画布都切回原图并搬回 EXIF。
+ * 9 张画布 = 点一次，不用来回切 9 次。单个文件失败不影响其它文件。
+ */
+ipcMain.handle('recover:splitMany', async (_e, payload) => {
+  const { files = [], outDir, format, quality, keepExif } = payload;
+  const done = [];
+  const failed = [];
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
     try {
-      const m = JSON.parse(fs.readFileSync(path.join(dir, c), 'utf8'));
-      if (m.canvas && (c.startsWith(stem) || stem.startsWith(c.replace('.manifest.json', '')))) {
-        return { manifestFile: path.join(dir, c), manifest: m };
-      }
-    } catch { /* 跳过坏文件 */ }
+      send('progress', {
+        stage: 'batch', pct: i / files.length,
+        message: `正在切回第 ${i + 1} / ${files.length} 张画布…（${path.basename(f)}）`,
+      });
+      const found = findManifestFor(f);
+      if (!found) throw new Error('找不到配套的 .manifest.json');
+      const report = await splitCanvas({
+        returnedFile: f, manifest: found.manifest, outDir,
+        format: format || 'jpeg', quality: quality ?? 14, keepExif: keepExif !== false,
+        onProgress: (p) => send('progress', p),
+      });
+      const lib = readLibrary();
+      const b = lib.batches.find((x) => x.id === found.manifest.id);
+      if (b) { b.lastRecoverAt = new Date().toISOString(); b.lastRecoverOut = outDir; writeLibrary(lib); }
+      done.push({
+        index: i, file: f, name: path.basename(f), manifestFile: found.manifestFile,
+        outputs: report.outputs.length,
+        lossless: report.outputs.filter((o) => o.lossless).length,
+        warnings: report.warnings,
+      });
+    } catch (e) {
+      failed.push({ index: i, file: f, name: path.basename(f), error: e.message });
+    }
   }
-  return null;
+  return {
+    total: files.length, done, failed,
+    outputs: done.reduce((s, d) => s + d.outputs, 0),
+    lossless: done.reduce((s, d) => s + d.lossless, 0),
+    warnings: done.flatMap((d) => d.warnings ?? []),
+  };
 });
 
 ipcMain.handle('shell:reveal', (_e, p) => shell.showItemInFolder(p));
@@ -429,6 +502,13 @@ function createWindow() {
                   : `✘ 拖不动：${info.name} 停在 (${a?.x},${a?.y})  [事件 move=${after.events.move} down=${after.events.down}]`);
               }
             }
+          }
+
+          // PC_EVAL='<js>'：截图之前在页面里跑一段 JS（开发期验收用，比如点一下某个按钮）
+          if (process.env.PC_EVAL) {
+            const r = await win.webContents.executeJavaScript(process.env.PC_EVAL, true);
+            console.log('[eval]', typeof r === 'string' ? r : JSON.stringify(r));
+            await new Promise((res) => setTimeout(res, Number(process.env.PC_EVAL_WAIT || 900)));
           }
 
           const dump = await win.webContents.executeJavaScript(`(() => {

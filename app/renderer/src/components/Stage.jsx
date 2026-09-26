@@ -12,7 +12,7 @@ import { snapPosition, tooClose, asRect, clamp } from '../lib/geom.js';
  * 不变的红线：画布里永远不能有重叠 —— 被压住的像素根本不存在，切分时无处可取。
  */
 export default function Stage({
-  items, canvas, gutter, limit, selectedId, batch,
+  items, canvas, gutter, limit, selectedId, batch, draft,
   onSelect, onMove, onRemove, onDropFiles, onAddToCanvas,
 }) {
   const stageRef = useRef(null);
@@ -150,7 +150,19 @@ export default function Stage({
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
-      {empty ? (
+      {empty && draft ? (
+        // 手工新建的空画布：给一个明确的落点区，而不是"把照片拖进来"那个首次使用的引导
+        <div className="draft-drop">
+          <div className="empty-mark">
+            <svg width="34" height="34" viewBox="0 0 34 34" fill="none">
+              <rect x="3.5" y="3.5" width="27" height="27" rx="3" stroke="#DDA45C" strokeWidth="1.6" strokeDasharray="4 3" />
+              <path d="M17 11.5v11M11.5 17h11" stroke="#DDA45C" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+          </div>
+          <h2>这张画布还是空的</h2>
+          <p>从左边底片条把照片拖到这里，位置随你摆。想清空重来就把照片拖出去。</p>
+        </div>
+      ) : empty ? (
         <div className="empty">
           <div className="empty-mark">
             <svg width="34" height="34" viewBox="0 0 34 34" fill="none">
@@ -212,41 +224,56 @@ export default function Stage({
         </div>
       )}
 
-      {!empty && (
-        <div className="stage-batch">
-          {batch && batch.total > 1 && <span className="badge">画布 {batch.index + 1}/{batch.total}</span>}
-          <span style={{ fontFamily: 'var(--mono)' }}>{W} × {H}</span>
-          <span className="sep" />
-          <span>{items.length} 张 · 1:1 无损</span>
-          <span className="sep" />
-          <span className="muted" title="画布四周还能往外拖的余量">
-            余量 {remaining.w}×{remaining.h}
-          </span>
-          {batch?.label && <><span className="sep" /><span className="muted">{batch.label}</span></>}
+      {(!empty || draft) && (
+        <div className="stage-top">
+          <div className="stage-batch">
+            {batch && batch.total > 1 && <span className="badge">画布 {batch.index + 1}/{batch.total}</span>}
+            {draft ? (
+              <>
+                <span>空画布</span>
+                <span className="sep" />
+                <span className="muted">把左边底片拖进来</span>
+              </>
+            ) : (
+              <>
+                <span style={{ fontFamily: 'var(--mono)' }}>{W} × {H}</span>
+                <span className="sep" />
+                <span>{items.length} 张 · 1:1 无损</span>
+                <span className="sep" />
+                <span className="muted" title="画布四周还能往外拖的余量">
+                  余量 {remaining.w}×{remaining.h}
+                </span>
+                {batch?.label && <><span className="sep" /><span className="muted">{batch.label}</span></>}
+              </>
+            )}
+          </div>
+
+          {/* 提示条和信息条放在同一个 flex 容器里自动换行 —— 之前是各自绝对定位，窄窗口必然叠在一起 */}
+          {overW || overH ? (
+            <div className="stage-warn danger">
+              画布 {W}×{H} 超出像素蛋糕单边 {limit}px 上限{overW ? '（宽）' : ''}{overH ? '（高）' : ''}
+            </div>
+          ) : drag?.colliding ? (
+            <div className="stage-warn">
+              松手会自动挪到最近的空位（画布里不能有重叠 —— 被压住的像素切不回来）
+            </div>
+          ) : null}
         </div>
       )}
 
-      {!empty && (
+      {(!empty || draft) && (
         <div className="stage-toolbar">
-          <button className="btn ghost sm" onClick={() => setZoom((z) => clamp(z / 1.25, 0.15, 8))} title="缩小">−</button>
-          <button className="btn ghost sm" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} style={{ minWidth: 52, justifyContent: 'center' }}>
-            {Math.round(scale * 100)}%
-          </button>
-          <button className="btn ghost sm" onClick={() => setZoom((z) => clamp(z * 1.25, 0.15, 8))} title="放大">+</button>
-          <div style={{ width: 1, background: 'var(--line)', margin: '2px 3px' }} />
+          {!draft && (
+            <>
+              <button className="btn ghost sm" onClick={() => setZoom((z) => clamp(z / 1.25, 0.15, 8))} title="缩小">−</button>
+              <button className="btn ghost sm" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} style={{ minWidth: 52, justifyContent: 'center' }}>
+                {Math.round(scale * 100)}%
+              </button>
+              <button className="btn ghost sm" onClick={() => setZoom((z) => clamp(z * 1.25, 0.15, 8))} title="放大">+</button>
+              <div style={{ width: 1, background: 'var(--line)', margin: '2px 3px' }} />
+            </>
+          )}
           <button className="btn ghost sm" onClick={() => onDropFiles(null)}>添加</button>
-        </div>
-      )}
-
-      {drag?.colliding && (
-        <div className="stage-warn">
-          松手会自动挪到最近的空位（画布里不能有重叠 —— 被压住的像素切不回来）
-        </div>
-      )}
-
-      {(overW || overH) && !empty && (
-        <div className="stage-warn danger">
-          画布 {W}×{H} 超出像素蛋糕单边 {limit}px 上限{overW ? '（宽）' : ''}{overH ? '（高）' : ''}
         </div>
       )}
     </div>

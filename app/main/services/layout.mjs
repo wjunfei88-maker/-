@@ -266,47 +266,107 @@ export function packCanvas(images, opts = {}) {
   };
 }
 
+/* ── 固定种子的伪随机：同一批照片每次排版结果完全一致（测试才稳）── */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** 按不同优先级排序；jitter 用来给多起点搜索制造差异（同一种排序的微小扰动） */
+function orderBy(images, mode, jitter) {
+  const keys = [
+    (i) => -(i.width * i.height),          // 面积大优先
+    (i) => -Math.max(i.width, i.height),   // 长边优先
+    (i) => -i.height,
+    (i) => -i.width,
+    (i) => -(i.width + i.height),
+    (i) => -Math.min(i.width, i.height),
+  ];
+  const base = keys[mode % keys.length];
+  return [...images]
+    .map((i) => ({ i, s: base(i) * (1 + (jitter?.get(i.id) ?? 0)) }))
+    .sort((a, b) => a.s - b.s)
+    .map((x) => x.i);
+}
+
+const bestOf = (plans) => plans.reduce((a, b) => (b.length < a.length ? b : a), plans[0]);
+
 /**
- * 全局排版：把所有图分到尽量少的画布上（画布数 = 像素蛋糕扣费张数）。
+ * 全局排版：把所有图分到**尽量少**的画布上（画布数 = 像素蛋糕扣费张数）。
  *
- * 做法：多套全局排序各贪心一遍，取画布数最少的那个；
- *       再做一轮"补漏"——试着把最空的那些画布里的图塞进别的画布，能塞进去就把画布省掉。
+ * 这是整个项目最值钱的一段代码 —— 少一张画布 = 少扣一次费。
+ * MaxRects 是启发式算法，**输入的先后顺序直接决定结果好坏**，
+ * 所以这里不赌单一排序，而是跑三类候选方案，取画布数最少的那个：
+ *
+ *   1) 6 套确定性排序，各贪心一遍（填满一张再填下一张）
+ *   2) 最优适配（Best-Fit Decreasing）：同时维护所有画布，
+ *      每张图都放进"放进去之后浪费最少"的那张
+ *   3) 带抖动的随机多起点（固定种子 → 结果可复现）
+ *
+ * 最后再做两轮"补漏"：把最空的画布整个搬空，从而省掉它。
+ *
+ * 用户想要的"回字形"（横竖互扣的紧凑排布）就是这套搜索在
+ * 密度优先时自然找到的解 —— 不写死某一种图案，而是找最省画布的那个。
  */
 export function planGroups(images, opts = {}) {
   const { limit = CANVAS_LIMIT, gutter = 24, allowRotate = false } = opts;
   const usable = images.filter((i) => placeable(i, limit));
   const unplaceable = images.filter((i) => !placeable(i, limit));
-  if (!usable.length) return { canvases: [], unplaceable, allowRotate };
-
-  const orders = [
-    [...usable].sort((a, b) => b.width * b.height - a.width * a.height),
-    [...usable].sort((a, b) => Math.max(b.width, b.height) - Math.max(a.width, a.height)),
-    [...usable].sort((a, b) => b.height - a.height),
-    [...usable].sort((a, b) => b.width - a.width),
-    [...usable].sort((a, b) => (b.width - b.height) - (a.width - a.height)),
-    [...usable].sort((a, b) => b.width + b.height - (a.width + a.height)),
-  ];
+  if (!usable.length) return { canvases: [], unplaceable, allowRotate, lowerBound: 0 };
 
   const packOpts = { limit, gutter, allowRotate };
-  let best = null;
-  for (const order of orders) {
-    const plan = greedyGroups(order, packOpts);
-    if (!best || plan.length < best.length) best = plan;
+
+  // 一张画布最多能塞几张（同时用来做理论下界和窗口大小）
+  const oneBinMax = packCanvas(usable, packOpts).placed.length || 1;
+  // 理论下界：面积下限 与 张数下限 取大者。达到就说明已经最优，可以提前收工
+  const totalArea = usable.reduce((s, i) => s + i.width * i.height, 0);
+  const lowerBound = Math.max(
+    Math.ceil(totalArea / (limit * limit)),
+    Math.ceil(usable.length / oneBinMax),
+  );
+
+  // 每轮只从队首取这么多张去试填一张画布 —— 图上几百张时把复杂度从 O(n²) 压成 O(n)
+  const windowSize = Math.max(40, oneBinMax * 6);
+
+  const candidates = [];
+  for (let m = 0; m < 6; m++) candidates.push(greedyGroups(orderBy(usable, m), packOpts, windowSize));
+  candidates.push(bestFitGroups(usable, packOpts));
+
+  // 随机多起点。图片越多跑得越少，避免大工程卡住界面
+  // effort > 1 可以换更长的搜索时间换更少的画布（少一张画布 = 少扣一次费）
+  // 小批量（摄影师一次几十张）跑得动，就多搜几轮 —— 实测能把 7 张画布压到理论下界 6 张
+  const effort = opts.effort ?? 1;
+  const restarts = Math.max(1, Math.round(
+    (usable.length <= 60 ? 160 : usable.length <= 200 ? 24 : 8) * effort,
+  ));
+  const rng = mulberry32(0x9e3779b9);
+  for (let k = 0; k < restarts; k++) {
+    if (bestOf(candidates).length <= lowerBound) break;     // 已到理论最优，别再浪费时间
+    const jitter = new Map(usable.map((i) => [i.id, (rng() - 0.5) * 0.55]));
+    candidates.push(greedyGroups(orderBy(usable, Math.floor(rng() * 6), jitter), packOpts, windowSize));
   }
 
+  let best = bestOf(candidates);
   best = refillPass(best, packOpts);
-  best = refillPass(best, packOpts);      // 再来一轮，第二轮往往还能再省一张
+  best = refillPass(best, packOpts);      // 第二轮往往还能再省一张
 
-  return { canvases: best, unplaceable, allowRotate };
+  return { canvases: best, unplaceable, allowRotate, lowerBound };
 }
 
-/** 贪心：每轮用 packCanvas 尽量填满一张画布 */
-function greedyGroups(order, packOpts) {
+/** 贪心：每轮用 packCanvas 尽量填满一张画布（只看队首窗口，够填满就行） */
+function greedyGroups(order, packOpts, windowSize = 60) {
   const remaining = [...order];
   const canvases = [];
   let guard = 0;
   while (remaining.length && guard++ < 5000) {
-    const r = packCanvas(remaining, packOpts);
+    const window = remaining.slice(0, Math.min(windowSize, remaining.length));
+    const r = packCanvas(window, packOpts);
     if (!r.placed.length) break;                     // 一张都放不下，收工
     canvases.push({
       placed: r.placed, width: r.width, height: r.height,
@@ -318,6 +378,36 @@ function greedyGroups(order, packOpts) {
     }
   }
   return canvases;
+}
+
+/**
+ * 最优适配（Best-Fit Decreasing）：
+ * 同时维护所有画布，每张图都放进"放进去之后浪费面积最少"的那张；
+ * 哪张都放不进才开新画布。和贪心的差别是它不会先把一张填满再管下一张。
+ */
+function bestFitGroups(images, packOpts) {
+  const bins = [];
+  for (const img of orderBy(images, 0)) {            // 面积大优先
+    let pick = null;
+    for (const bin of bins) {
+      const trial = [...bin.placed.map(placedToImage), img];
+      const r = packCanvas(trial, packOpts);
+      if (r.placed.length !== trial.length) continue;     // 塞不进这张
+      const used = r.placed.reduce((s, p) => s + p.w * p.h, 0);
+      const waste = r.width * r.height - used;
+      if (!pick || waste < pick.waste) pick = { bin, r, waste };
+    }
+    if (pick) {
+      Object.assign(pick.bin, {
+        placed: pick.r.placed, width: pick.r.width,
+        height: pick.r.height, util: pick.r.util, strategy: pick.r.strategy,
+      });
+    } else {
+      const r = packCanvas([img], packOpts);
+      bins.push({ placed: r.placed, width: r.width, height: r.height, util: r.util, strategy: r.strategy });
+    }
+  }
+  return bins;
 }
 
 /** 把一个已放置的条目还原成 packCanvas 能吃的描述符（尺寸取原始朝向） */

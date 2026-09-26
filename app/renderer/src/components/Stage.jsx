@@ -1,29 +1,30 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { resolvePlacement, clamp } from '../lib/geom.js';
+import { snapPosition, tooClose, asRect, clamp } from '../lib/geom.js';
 
 /**
- * 画布舞台
+ * 画布舞台（PS 式自由拖动）
  *
- * 关键交互约束（来自 M0 实测结论）：
- *  · 拖到接近另一张图时自动吸附，吸附目标**已经含了保护带**，所以吸上就是留好缝的位置
- *  · 任何情况下都不允许两张图相碰 —— 落点会被沿最小位移方向推出去
- *  · 画布上永远不会有"看不见的隐藏像素"，这是能切回原图的前提
+ * 与 v1 的关键差别：
+ *   · 拖动**完全跟手** —— 不再有"撞到别人就被弹开"的硬推挤
+ *   · 与别的图重叠时描红警告，松手后由 App 调用 findFreeSpot 自动挪到最近的合法位置
+ *   · 画布尺寸 = 内容包围盒，所以可以把图拖到外面，画布跟着长大（单边上限 12000）
+ *
+ * 不变的红线：画布里永远不能有重叠 —— 被压住的像素根本不存在，切分时无处可取。
  */
 export default function Stage({
   items, canvas, gutter, limit, selectedId, batch,
-  onSelect, onMove, onRemove, onDropFiles,
+  onSelect, onMove, onRemove, onDropFiles, onAddToCanvas,
 }) {
   const stageRef = useRef(null);
   const [fit, setFit] = useState(1);
-  const [zoom, setZoom] = useState(1);       // 用户额外缩放倍率
+  const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [drag, setDrag] = useState(null);    // { id, dx, dy, ghost }
+  const [drag, setDrag] = useState(null);
   const [hot, setHot] = useState(false);
   const [spaceDown, setSpaceDown] = useState(false);
 
   const scale = fit * zoom;
 
-  // 自动适配
   useLayoutEffect(() => {
     const el = stageRef.current;
     if (!el || !canvas.width || !canvas.height) return;
@@ -39,9 +40,12 @@ export default function Stage({
 
   useEffect(() => { setPan({ x: 0, y: 0 }); }, [canvas.width, canvas.height]);
 
-  // 空格键 = 抓手平移
   useEffect(() => {
-    const dn = (e) => { if (e.code === 'Space' && !e.repeat) { setSpaceDown(true); e.preventDefault(); } };
+    const dn = (e) => {
+      if (e.code === 'Space' && !e.repeat && !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) {
+        setSpaceDown(true); e.preventDefault();
+      }
+    };
     const up = (e) => { if (e.code === 'Space') setSpaceDown(false); };
     window.addEventListener('keydown', dn);
     window.addEventListener('keyup', up);
@@ -57,14 +61,22 @@ export default function Stage({
   const [panning, setPanning] = useState(null);
   const dragItem = drag ? items.find((i) => i.id === drag.id) : null;
 
-  // ── 拖动图片 ──
+  // 验收探针：把拖动中的状态暴露出去，方便 PC_DRAGTEST 判断事件有没有真的进来
+  useEffect(() => {
+    window.__pcDrag = drag ? { id: drag.id, x: drag.x, y: drag.y, colliding: drag.colliding } : null;
+  }, [drag]);
+
+  /** setPointerCapture 在合成事件 / 极端情况下会抛，包一层别让它打断拖动 */
+  const capture = (el, pointerId) => { try { el?.setPointerCapture?.(pointerId); } catch { /* 忽略 */ } };
+
+  // ── 拖动图片（自由跟随，只做轻微吸附）──
   const onPointerDown = (e, it) => {
     if (e.button !== 0) return;
     e.stopPropagation();
     onSelect(it.id);
     const p = toCanvasSpace(e.clientX, e.clientY);
-    setDrag({ id: it.id, grabX: p.x - it.x, grabY: p.y - it.y, x: it.x, y: it.y, collided: false });
-    e.currentTarget.setPointerCapture(e.pointerId);
+    setDrag({ id: it.id, grabX: p.x - it.x, grabY: p.y - it.y, x: it.x, y: it.y, colliding: false });
+    capture(e.currentTarget, e.pointerId);
   };
 
   const onPointerMove = (e) => {
@@ -72,9 +84,13 @@ export default function Stage({
       const p = toCanvasSpace(e.clientX, e.clientY);
       const desired = { x: p.x - drag.grabX, y: p.y - drag.grabY };
       const others = items.filter((i) => i.id !== drag.id);
-      const r = resolvePlacement(desired, { width: dragItem?.width ?? 0, height: dragItem?.height ?? 0 },
-        others, canvas, gutter, 14 / Math.max(scale, 0.05));
-      setDrag((d) => ({ ...d, x: r.x, y: r.y, collided: r.collided }));
+      // 吸附阈值固定为"屏幕上 8px"，这样不管画布多大，手感一致
+      const threshold = 8 / Math.max(scale, 0.02);
+      const s = snapPosition(desired, { width: dragItem?.width ?? 0, height: dragItem?.height ?? 0 },
+        others, limit, threshold, gutter);
+      const me = { x: s.x, y: s.y, w: dragItem?.width ?? 0, h: dragItem?.height ?? 0 };
+      const colliding = others.some((o) => tooClose(me, asRect(o), gutter));
+      setDrag((d) => ({ ...d, x: s.x, y: s.y, colliding }));
     } else if (panning) {
       setPan({ x: panning.px + (e.clientX - panning.sx), y: panning.py + (e.clientY - panning.sy) });
     }
@@ -87,26 +103,30 @@ export default function Stage({
 
   const onStageDown = (e) => {
     if (e.target.closest('.canvas-item')) return;
+    if (e.target.closest('.stage-toolbar') || e.target.closest('.stage-batch')) return;
     onSelect(null);
-    if (spaceDown || e.button === 1 || e.target.closest('.canvas-rect') === null && e.button === 0) {
+    // 平移：空格 + 拖 / 中键拖 / 在画布外的灰底上左键拖
+    const outsideRect = e.target.closest('.canvas-rect') === null;
+    if (spaceDown || e.button === 1 || (outsideRect && e.button === 0)) {
       setPanning({ sx: e.clientX, sy: e.clientY, px: pan.x, py: pan.y });
-      e.currentTarget.setPointerCapture?.(e.pointerId);
+      capture(e.currentTarget, e.pointerId);
     }
   };
 
-  // ── 滚轮缩放 ──
   const onWheel = (e) => {
     if (!(e.ctrlKey || e.metaKey || e.altKey)) return;
     e.preventDefault();
-    const k = Math.exp(-e.deltaY * 0.0016);
-    setZoom((z) => clamp(z * k, 0.15, 8));
+    setZoom((z) => clamp(z * Math.exp(-e.deltaY * 0.0016), 0.15, 8));
   };
 
-  // ── 文件拖入 ──
+  // ── 从访达拖文件进来 ──
   const onDragOver = (e) => { e.preventDefault(); setHot(true); };
   const onDragLeave = (e) => { if (e.currentTarget === e.target) setHot(false); };
   const onDrop = (e) => {
     e.preventDefault(); setHot(false);
+    // 从左边底片条拖过来的
+    const id = e.dataTransfer?.getData('text/pc-image');
+    if (id && onAddToCanvas) { onAddToCanvas(id); return; }
     const files = [...(e.dataTransfer?.files ?? [])].map((f) => f.path || window.pc?.pathForFile(f)).filter(Boolean);
     if (files.length) onDropFiles(files);
   };
@@ -114,11 +134,12 @@ export default function Stage({
   const W = canvas.width, H = canvas.height;
   const overW = W > limit, overH = H > limit;
   const empty = items.length === 0;
+  const remaining = { w: limit - W, h: limit - H };
 
   return (
     <div
       ref={stageRef}
-      className={`stage${hot ? ' hot' : ''}`}
+      className={`stage${hot ? ' hot' : ''}${drag ? ' dragging' : ''}`}
       style={{ cursor: spaceDown ? (panning ? 'grabbing' : 'grab') : 'default' }}
       onPointerDown={onStageDown}
       onPointerMove={onPointerMove}
@@ -162,17 +183,28 @@ export default function Stage({
           >
             {items.map((it) => {
               const live = drag && drag.id === it.id ? { ...it, x: drag.x, y: drag.y } : it;
+              const colliding = drag && drag.id === it.id && drag.colliding;
               return (
                 <div
                   key={it.id}
-                  className={`canvas-item${selectedId === it.id ? ' selected' : ''}`}
-                  style={{ left: live.x, top: live.y, width: it.width, height: it.height, cursor: 'grab' }}
+                  className={`canvas-item${selectedId === it.id ? ' selected' : ''}${colliding ? ' colliding' : ''}${live.rotation ? ' rot90' : ''}`}
+                  style={{ left: live.x, top: live.y, width: it.width, height: it.height }}
                   onPointerDown={(e) => onPointerDown(e, it)}
                   onDoubleClick={() => onRemove(it.id)}
-                  title={`${it.name}\n${it.width}×${it.height}`}
+                  title={`${it.name}\n${it.natural?.width ?? it.width}×${it.natural?.height ?? it.height} · 1:1${live.rotation ? ' · 已旋转 90°' : ''}`}
                 >
-                  <img src={it.url} alt={it.name} draggable={false} />
+                  <img
+                    src={it.url}
+                    alt={it.name}
+                    draggable={false}
+                    style={live.rotation ? {
+                      position: 'absolute', top: '50%', left: '50%',
+                      width: it.height, height: it.width,
+                      transform: 'translate(-50%, -50%) rotate(90deg)',
+                    } : undefined}
+                  />
                   <div className="grip">✕</div>
+                  {live.rotation ? <div className="rot-badge" title="这张在画布里转了 90°，切回原图时自动转正">↻</div> : null}
                 </div>
               );
             })}
@@ -186,8 +218,11 @@ export default function Stage({
           <span style={{ fontFamily: 'var(--mono)' }}>{W} × {H}</span>
           <span className="sep" />
           <span>{items.length} 张 · 1:1 无损</span>
+          <span className="sep" />
+          <span className="muted" title="画布四周还能往外拖的余量">
+            余量 {remaining.w}×{remaining.h}
+          </span>
           {batch?.label && <><span className="sep" /><span className="muted">{batch.label}</span></>}
-          {batch && batch.total > 1 && <><span className="sep" /><span className="muted">每张 = 1 次额度</span></>}
         </div>
       )}
 
@@ -203,13 +238,14 @@ export default function Stage({
         </div>
       )}
 
+      {drag?.colliding && (
+        <div className="stage-warn">
+          松手会自动挪到最近的空位（画布里不能有重叠 —— 被压住的像素切不回来）
+        </div>
+      )}
+
       {(overW || overH) && !empty && (
-        <div style={{
-          position: 'absolute', top: 14, left: '50%', transform: 'translateX(-50%)',
-          padding: '7px 13px', borderRadius: 9, fontSize: 12,
-          background: 'rgba(232,119,111,0.14)', border: '0.5px solid rgba(232,119,111,0.45)',
-          color: '#f0a49e', backdropFilter: 'blur(14px)',
-        }}>
+        <div className="stage-warn danger">
           画布 {W}×{H} 超出像素蛋糕单边 {limit}px 上限{overW ? '（宽）' : ''}{overH ? '（高）' : ''}
         </div>
       )}

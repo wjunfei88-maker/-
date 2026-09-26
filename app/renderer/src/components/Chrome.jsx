@@ -1,6 +1,9 @@
 import React from 'react';
 
-export function TopBar({ onOpen, onAutoLayout, onCompose, onRecover, busy, hasImages, canCompose, batch }) {
+export function TopBar({
+  onOpen, onAutoLayout, onCompose, onComposeAll, onRecover,
+  busy, hasImages, canCompose, batch, canvasCount,
+}) {
   return (
     <header className="topbar">
       <div className="brand">
@@ -9,7 +12,7 @@ export function TopBar({ onOpen, onAutoLayout, onCompose, onRecover, busy, hasIm
       </div>
 
       {batch && (
-        <div className="seg" style={{ width: 158, marginRight: 4 }} title="自动排版把照片分成了多张画布，每张对应一次像素蛋糕额度">
+        <div className="seg" style={{ width: 166, marginRight: 4 }} title="自动排版把照片分成了多张画布，每张对应一次像素蛋糕额度。也可以点左栏的「画布」列表直接跳。">
           <button onClick={batch.onPrev} disabled={batch.index === 0} style={{ flex: '0 0 26px' }}>‹</button>
           <span style={{
             flex: 1, display: 'grid', placeItems: 'center', fontSize: 11.5,
@@ -23,12 +26,19 @@ export function TopBar({ onOpen, onAutoLayout, onCompose, onRecover, busy, hasIm
 
       <button className="btn" onClick={onOpen} disabled={busy}>导入照片</button>
       <button className="btn" onClick={onAutoLayout} disabled={busy || !hasImages}
-        title="按 12000px 单边上限自动排版，装不下会自动分组">自动排版</button>
+        title="按 12000px 单边上限搜索最优排版，装不下会自动分成最少的画布数">自动排版</button>
       <button className="btn" onClick={onRecover} disabled={busy}
         title="把像素蛋糕修完的图切回原图">切回原图</button>
-      <button className="btn primary" onClick={onCompose} disabled={busy || !canCompose}>
-        导出合成图
+      <button className="btn primary" onClick={onCompose} disabled={busy || !canCompose}
+        title="只导出当前这张画布（快捷键 ⌘E）">
+        导出当前画布
       </button>
+      {canvasCount > 1 && (
+        <button className="btn primary" onClick={onComposeAll} disabled={busy || !canCompose}
+          title={`一次把所有 ${canvasCount} 张画布都导出（快捷键 ⌘⇧E）`}>
+          全部导出 ({canvasCount})
+        </button>
+      )}
     </header>
   );
 }

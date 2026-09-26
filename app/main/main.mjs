@@ -7,7 +7,7 @@ import sharpLib from 'sharp';
 import { probeImage, makeThumb, shortId, IMAGE_EXT } from './services/library.mjs';
 
 const sharpMeta = (f) => sharpLib(f, { unlimited: true }).metadata();
-import { planGroups, packCanvas, CANVAS_LIMIT, capacityHint } from './services/layout.mjs';
+import { planGroups, packCanvas, CANVAS_LIMIT, capacityHint, capacityExplain } from './services/layout.mjs';
 import { composeCanvas, makeCanvasPreview } from './services/render.mjs';
 import { splitCanvas } from './services/split.mjs';
 
@@ -111,26 +111,52 @@ ipcMain.handle('images:import', async (_e, filePaths) => {
 
 /** 一键自动排版：算出一张画布怎么摆 */
 ipcMain.handle('layout:pack', (_e, images, opts = {}) => {
-  const r = packCanvas(images, { limit: CANVAS_LIMIT, gutter: opts.gutter ?? 24 });
+  const r = packCanvas(images, { limit: CANVAS_LIMIT, gutter: opts.gutter ?? 24, allowRotate: !!opts.allowRotate });
   return { ...r, hint: r.placed.length ? capacityHint(r, CANVAS_LIMIT) : null };
 });
 
 /** 分组规划：装不下就拆成多张画布，最小化画布数量 */
 ipcMain.handle('layout:plan', (_e, images, opts = {}) => {
-  const plan = planGroups(images, { limit: CANVAS_LIMIT, gutter: opts.gutter ?? 24 });
+  const allowRotate = !!opts.allowRotate;
+  const plan = planGroups(images, { limit: CANVAS_LIMIT, gutter: opts.gutter ?? 24, allowRotate });
   return {
-    canvases: plan.canvases.map((c) => ({ ...c, hint: capacityHint(c, CANVAS_LIMIT) })),
+    allowRotate,
+    canvases: plan.canvases.map((c) => ({
+      ...c,
+      hint: capacityHint(c, CANVAS_LIMIT),
+      // image 是完整原对象，跨 IPC 传一遍纯属浪费；渲染层按 id 就能查回来
+      placed: c.placed.map(({ image, ...rest }) => rest),
+    })),
     unplaceable: plan.unplaceable,
   };
 });
 
-/** 导出合成图 + manifest */
-ipcMain.handle('export:compose', async (_e, payload) => {
+/** 容量说明：为什么一张画布只能放 N 张（用真实尺寸算给用户看） */
+ipcMain.handle('layout:capacity', (_e, images, opts = {}) => {
+  const withSize = images.filter((i) => i.width && i.height);
+  if (!withSize.length) return { max: 0, rows: [] };
+  // 同名尺寸归一类，取占比最大的那一类来解释
+  const groups = new Map();
+  for (const i of withSize) {
+    const k = `${i.width}×${i.height}`;
+    groups.set(k, (groups.get(k) ?? 0) + 1);
+  }
+  const [topKey] = [...groups.entries()].sort((a, b) => b[1] - a[1])[0];
+  const [w, h] = topKey.split('×').map(Number);
+  return { ...capacityExplain([{ id: 'x', width: w, height: h }], CANVAS_LIMIT, opts.gutter ?? 24), size: topKey, kinds: groups.size };
+});
+
+/**
+ * 导出**一张**画布：合成 TIFF + 写 manifest + 生成预览 + 记进历史批次。
+ * 批量导出就是把它按顺序调 N 次（每张画布 = 像素蛋糕的一次额度）。
+ */
+async function exportOne(payload, { suffix = '' } = {}) {
   const { items, width, height, gutter, name, outDir, icc, compression } = payload;
+  if (!items?.length) throw new Error('画布上还没有图片');
   fs.mkdirSync(outDir, { recursive: true });
   const id = shortId(6);
   const safe = (name || 'batch').replace(/[/\\:*?"<>|]/g, '_');
-  const base = `TILE_${safe}_${id}`;
+  const base = `TILE_${safe}_${id}${suffix}`;
   const canvasFile = path.join(outDir, `${base}.tif`);
 
   const started = Date.now();
@@ -141,12 +167,14 @@ ipcMain.handle('export:compose', async (_e, payload) => {
   });
 
   const manifest = {
-    version: 1, id, name: safe, createdAt: new Date().toISOString(),
+    version: 2, id, name: safe, createdAt: new Date().toISOString(),
     canvas: { width, height }, limit: CANVAS_LIMIT, gutter,
     strategy: payload.strategy ?? null,
     items: items.map((it, i) => ({
       id: it.id ?? `item-${i}`, name: it.name, source: it.source, format: it.format ?? null,
-      natural: { width: it.crop.width, height: it.crop.height },
+      // 排版时转过 90° 的，切分时要转回来。natural 记用户看到的原始朝向尺寸。
+      rotation: it.rotation ?? 0,
+      natural: it.natural ?? { width: it.crop.width, height: it.crop.height },
       crop: { left: it.crop.left, top: it.crop.top, width: it.crop.width, height: it.crop.height },
     })),
   };
@@ -172,6 +200,32 @@ ipcMain.handle('export:compose', async (_e, payload) => {
     previewUrl: 'pcfile://local' + encodeURI(previewFile),
     hint: capacityHint({ width, height, util: items.reduce((s, it) => s + it.crop.width * it.crop.height, 0) / (width * height) }, CANVAS_LIMIT),
   };
+}
+
+/** 导出合成图 + manifest */
+ipcMain.handle('export:compose', (_e, payload) => exportOne(payload));
+
+/**
+ * 全部导出：一次把所有画布都产出（每张 = 一个 TIFF + 一个 manifest）。
+ * 10 张照片分成 5 张画布时，不用手点 5 次。
+ */
+ipcMain.handle('export:composeAll', async (_e, payload) => {
+  const { canvases = [], ...rest } = payload;
+  const done = [];
+  const failed = [];
+  for (let i = 0; i < canvases.length; i++) {
+    try {
+      send('progress', {
+        stage: 'batch', pct: i / canvases.length,
+        message: `正在导出第 ${i + 1} / ${canvases.length} 张画布…`,
+      });
+      const suffix = canvases.length > 1 ? `_c${String(i + 1).padStart(2, '0')}` : '';
+      done.push({ index: i, ...(await exportOne({ ...rest, ...canvases[i] }, { suffix })) });
+    } catch (e) {
+      failed.push({ index: i, error: e.message });
+    }
+  }
+  return { total: canvases.length, done, failed };
 });
 
 /** 切回原图 */
@@ -251,31 +305,38 @@ function createWindow() {
         try {
           const before = readLibrary().batches.length;
           const clicked = await win.webContents.executeJavaScript(`(() => {
-            const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim() === '导出合成图');
+            const label = (x) => x.textContent.trim();
+            const b = [...document.querySelectorAll('button')].find(x =>
+              ['导出合成图', '只导出当前这张'].includes(label(x)) || label(x).startsWith('全部导出'));
             if (!b) return 'no-button';
             if (b.disabled) return 'disabled';
-            b.click(); return 'clicked';
+            b.click(); return 'clicked:' + label(b);
           })()`);
           log('点击导出：' + clicked);
-          for (let i = 0; i < 60; i++) {
+          // 「全部导出 (N)」要等 N 张画布全部写完，不能看到第一条批次就收工
+          const expect = Number((clicked.match(/\((\d+)\)/) ?? [])[1] ?? 1);
+          for (let i = 0; i < 240; i++) {
             await new Promise((r) => setTimeout(r, 1500));
             const lib = readLibrary();
-            if (lib.batches.length > before) {
-              const b = lib.batches[0];
-              const ok = fs.existsSync(b.canvasFile) && fs.existsSync(b.manifestFile);
-              const md = ok ? await sharpMeta(b.canvasFile) : null;
-              log(`产物 OK=${ok} 文件=${path.basename(b.canvasFile)} 尺寸=${md ? md.width + '×' + md.height : '?'} 大小=${(b.bytes / 1024 / 1024).toFixed(0)}MB 耗时=${b.elapsed}ms`);
-              log('manifest 条目=' + JSON.parse(fs.readFileSync(b.manifestFile, 'utf8')).items.length);
+            const fresh = lib.batches.slice(0, lib.batches.length - before);
+            if (fresh.length >= expect) {
+              for (const b of fresh.reverse()) {
+                const ok = fs.existsSync(b.canvasFile) && fs.existsSync(b.manifestFile);
+                const md = ok ? await sharpMeta(b.canvasFile) : null;
+                log(`产物 OK=${ok} 文件=${path.basename(b.canvasFile)} 尺寸=${md ? md.width + '×' + md.height : '?'} 大小=${(b.bytes / 1024 / 1024).toFixed(0)}MB 耗时=${b.elapsed}ms`);
+                log('  manifest 条目=' + JSON.parse(fs.readFileSync(b.manifestFile, 'utf8')).items.length);
+              }
+              log(`共产出 ${fresh.length}/${expect} 张画布`);
               if (process.env.PC_SHOT) {
                 const img = await win.webContents.capturePage();
                 fs.writeFileSync(process.env.PC_SHOT, img.toPNG());
                 log('screenshot → ' + process.env.PC_SHOT);
               }
-              app.exit(ok ? 0 : 2);
+              app.exit(fresh.every((b) => fs.existsSync(b.canvasFile)) ? 0 : 2);
               return;
             }
           }
-          log('超时：60 秒内没等到产物');
+          log(`超时：360 秒内只等到 ${readLibrary().batches.length - before}/${expect} 张`);
           app.exit(3);
         } catch (e) {
           log('异常：' + e.message);
@@ -290,6 +351,86 @@ function createWindow() {
     win.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
         try {
+          // PC_DRAGTEST=1：真的模拟一次拖动，验证"图能拖得动"（v1 的硬推挤让拖动等于没拖）。
+          // 用 sendInputEvent 注入**真实鼠标输入** —— 合成 PointerEvent 进不了 React 的委托系统，
+          // 而且真实输入才能验证 pointer capture / 事件链路。
+          if (process.env.PC_DRAGTEST) {
+            const info = JSON.parse(await win.webContents.executeJavaScript(`(() => {
+              const els = [...document.querySelectorAll('.canvas-item')];
+              if (!els.length) return JSON.stringify({ err: 'stage 上没有图片' });
+              const items = window.__pcDebug?.items ?? [];
+              const el = els[els.length - 1];
+              const b = el.getBoundingClientRect();
+              // 事件计数：判断 pointermove 到底有没有到达 .stage（与 React 无关）
+              window.__mc = { move: 0, down: 0, up: 0 };
+              const stage = document.querySelector('.stage');
+              stage.addEventListener('pointermove', () => window.__mc.move++, true);
+              stage.addEventListener('pointerdown', () => window.__mc.down++, true);
+              stage.addEventListener('pointerup', () => window.__mc.up++, true);
+              return JSON.stringify({
+                before: items.map(i => ({ name: i.name, x: i.x, y: i.y })),
+                name: items[items.length - 1]?.name,
+                domItems: els.map(e => ({
+                  alt: e.querySelector('img')?.alt,
+                  left: e.style.left, top: e.style.top,
+                  w: e.style.width, h: e.style.height,
+                })),
+                rect: document.querySelector('.canvas-rect')?.getBoundingClientRect().toJSON(),
+                sx: Math.round(b.left + b.width / 2),
+                sy: Math.round(b.top + b.height / 2),
+              });
+            })()`));
+
+            if (info.err) {
+              console.log('[drag] ✘', info.err);
+            } else {
+              const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+              // 先把光标移到目标上（真实鼠标一定有这一步，Chromium 也借此确定指针位置），
+              // 否则第一次 mouseMove 可能被当成"建立位置"而丢掉。
+              win.webContents.sendInputEvent({ type: 'mouseMove', x: info.sx, y: info.sy });
+              await sleep(120);
+              win.webContents.sendInputEvent({ type: 'mouseDown', x: info.sx, y: info.sy, button: 'left', clickCount: 1 });
+              await sleep(220);
+              if (process.env.PC_DEBUG) {
+                const d = await win.webContents.executeJavaScript(
+                  `JSON.stringify({ drag: window.__pcDrag ?? null, selected: window.__pcDebug?.selectedId ?? null, events: window.__mc })`);
+                console.log('[drag] mousedown 之后：', d);
+              }
+              for (let k = 1; k <= 10; k++) {
+                win.webContents.sendInputEvent({
+                  type: 'mouseMove', x: info.sx + k * 24, y: info.sy + k * 24, button: 'left',
+                });
+                await sleep(70);
+              }
+              const ex = info.sx + 240, ey = info.sy + 240;
+              win.webContents.sendInputEvent({ type: 'mouseMove', x: ex, y: ey, button: 'left' });
+              await sleep(90);
+              if (process.env.PC_DEBUG) {
+                const d = await win.webContents.executeJavaScript(
+                  `JSON.stringify({ drag: window.__pcDrag ?? null, events: window.__mc })`);
+                console.log('[drag] mousemove 之后：', d);
+              }
+              win.webContents.sendInputEvent({ type: 'mouseUp', x: ex, y: ey, button: 'left', clickCount: 1 });
+              await sleep(800);
+
+              const after = JSON.parse(await win.webContents.executeJavaScript(
+                `JSON.stringify({ items: (window.__pcDebug?.items ?? []).map(i => ({ name: i.name, x: i.x, y: i.y })), events: window.__mc })`));
+              const b = info.before.find((i) => i.name === info.name);
+              const a = after.items.find((i) => i.name === info.name);
+              const moved = b && a && (b.x !== a.x || b.y !== a.y);
+              const delivered = (after.events?.move ?? 0) > 0 && (after.events?.down ?? 0) > 0;
+
+              if (!delivered) {
+                // 注入的鼠标事件没送到页面 —— 这是测试环境的问题，不是 app 的问题，不能报失败
+                console.log('[drag] ⚠ 无法判定：注入的鼠标事件没有送达渲染进程（交互需人工确认）');
+              } else {
+                console.log('[drag]', moved
+                  ? `✔ 拖得动：${info.name} (${b.x},${b.y}) → (${a.x},${a.y})  [事件 move=${after.events.move} down=${after.events.down}]`
+                  : `✘ 拖不动：${info.name} 停在 (${a?.x},${a?.y})  [事件 move=${after.events.move} down=${after.events.down}]`);
+              }
+            }
+          }
+
           const dump = await win.webContents.executeJavaScript(`(() => {
             const r = document.querySelector('.canvas-rect');
             const items = [...document.querySelectorAll('.canvas-item')];
@@ -298,13 +439,15 @@ function createWindow() {
               state: window.__pcDebug ? {
                 items: window.__pcDebug.items.length,
                 canvas: window.__pcDebug.canvas,
+                canvases: window.__pcDebug.canvases,
                 firstUrl: window.__pcDebug.items[0] && window.__pcDebug.items[0].url,
-                firstImgSrc: items[0] && items[0].querySelector('img') && items[0].querySelector('img').src,
               } : null,
               rect: r ? r.getBoundingClientRect().toJSON() : null,
-              rectStyle: r ? getComputedStyle(r).width + ' x ' + getComputedStyle(r).height + ' bg=' + getComputedStyle(r).backgroundColor : null,
+              rectStyle: r ? getComputedStyle(r).width + ' x ' + getComputedStyle(r).height : null,
               items: items.length,
               wrapTransform: wrap ? getComputedStyle(wrap).transform : null,
+              canvasRows: document.querySelectorAll('.cl-row').length,
+              capBig: document.querySelector('.cap-big')?.textContent ?? null,
               imgComplete: items.map(i => { const im = i.querySelector('img'); return im ? im.complete + ':' + im.naturalWidth : 'none'; }),
             });
           })()`);

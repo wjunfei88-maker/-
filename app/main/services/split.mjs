@@ -72,6 +72,10 @@ export async function splitCanvas(opts) {
 
     let pipe = sharp(returnedFile, { unlimited: true })
       .extract({ left, top, width, height });
+    // 排版时被转过 90° 的，这里必须转回来，否则交付的照片是躺着的。
+    // 旋转是整数像素重排，不引入重采样 —— 仍然是无损的。
+    const rotated = it.rotation === 90;
+    if (rotated) pipe = pipe.rotate(-90);
     if (fmt === 'jpeg') {
       const q = Math.max(1, Math.min(100, Math.round(quality / 14 * 100)));
       pipe = pipe.flatten({ background: '#ffffff' }).jpeg({ quality: q, chromaSubsampling: '4:4:4', mozjpeg: false });
@@ -88,13 +92,17 @@ export async function splitCanvas(opts) {
     if (keepExif && fmt === 'jpeg' && it.source && fs.existsSync(it.source)) {
       exifCopied = await copyExifBetweenFiles(it.source, outFile);
     }
+    // 转过 90° 的，输出尺寸要和原图对齐（宽高互换回来）再判定无损
+    const outW = rotated ? height : width;
+    const outH = rotated ? width : height;
     report.outputs.push({
       index: i,
       name: path.basename(outFile),
       file: outFile,
-      size: `${width}×${height}`,
+      size: `${outW}×${outH}`,
       natural: it.natural,
-      lossless: report.dimsMatch && width === it.natural.width && height === it.natural.height,
+      rotation: it.rotation ?? 0,
+      lossless: report.dimsMatch && outW === it.natural.width && outH === it.natural.height,
       exifCopied,
       source: it.source,
     });

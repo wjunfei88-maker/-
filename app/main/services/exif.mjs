@@ -66,6 +66,39 @@ export function stripThumbnail(exifPayload) {
   return out;
 }
 
+/**
+ * 把 IFD0 的 Orientation 标签改写成指定值（默认 1 = 正常朝向）。
+ *
+ * 为什么必须做：导入时我们就用 .rotate() 把 EXIF 方向**烤进了像素**，
+ * 切分出来的是已经摆正的画面。如果这时候把原图的 Orientation=6 原样搬回来，
+ * 访达 / 微信 / Photoshop 会**再转一次** —— 竖拍照片交付时就是躺倒的。
+ * （横拍照片 orientation=1，所以这个坑只有在竖拍时才会暴露。）
+ *
+ * 没有 Orientation 标签就什么都不做 —— 缺省即 1。
+ */
+export function normalizeOrientation(exifPayload, value = 1) {
+  const T = 6;                                        // 跳过 "Exif\0\0"
+  if (exifPayload.length < T + 8) return exifPayload;
+  const out = Buffer.from(exifPayload);
+  const little = out.readUInt16BE(T) === 0x4949;
+  const rd32 = (o) => (little ? out.readUInt32LE(o) : out.readUInt32BE(o));
+  const rd16 = (o) => (little ? out.readUInt16LE(o) : out.readUInt16BE(o));
+  if (rd16(T + 2) !== 42) return out;
+
+  const ifd0 = T + rd32(T + 4);
+  if (ifd0 + 2 > out.length) return out;
+  const count = rd16(ifd0);
+  for (let i = 0; i < count; i++) {
+    const e = ifd0 + 2 + i * 12;
+    if (e + 12 > out.length) break;
+    if (rd16(e) === 0x0112) {                         // Orientation
+      if (little) out.writeUInt16LE(value, e + 8); else out.writeUInt16BE(value, e + 8);
+      return out;
+    }
+  }
+  return out;
+}
+
 /** 把 EXIF 载荷注入一张 JPEG（会先移除目标里已有的 EXIF APP1） */
 export function injectExif(jpegBuffer, exifPayload) {
   if (!exifPayload || !exifPayload.length) return jpegBuffer;
@@ -91,7 +124,7 @@ export function injectExif(jpegBuffer, exifPayload) {
   return Buffer.concat([Buffer.from([0xff, 0xd8]), seg, rest]);
 }
 
-/** 一站式：把 srcFile 的 EXIF（去掉缩略图）搬到 destFile */
+/** 一站式：把 srcFile 的 EXIF（去掉缩略图 + 朝向归一）搬到 destFile */
 export async function copyExifBetweenFiles(srcFile, destFile) {
   try {
     const src = fs.readFileSync(srcFile);
@@ -99,7 +132,8 @@ export async function copyExifBetweenFiles(srcFile, destFile) {
     if (src.readUInt16BE(0) !== SOI || dest.readUInt16BE(0) !== SOI) return false;
     const exif = extractExif(src);
     if (!exif) return false;
-    const cleaned = stripThumbnail(exif);
+    // 摘缩略图 + 朝向归一（像素已经在导入时摆正了，绝不能再让看图软件转第二次）
+    const cleaned = normalizeOrientation(stripThumbnail(exif), 1);
     fs.writeFileSync(destFile, injectExif(dest, cleaned));
     return true;
   } catch {

@@ -11,11 +11,14 @@ import os from 'node:os';
 import sharp from 'sharp';
 import exifReader from 'exif-reader';
 
-import { planGroups, packCanvas, assertNoOverlap } from '../main/services/layout.mjs';
+import { planGroups, packCanvas, assertNoOverlap, capacityExplain } from '../main/services/layout.mjs';
 import { composeCanvas } from '../main/services/render.mjs';
 import { splitCanvas } from '../main/services/split.mjs';
-import { extractExif, stripThumbnail, injectExif, hasExif } from '../main/services/exif.mjs';
+import { extractExif, stripThumbnail, injectExif, hasExif, normalizeOrientation } from '../main/services/exif.mjs';
 import { probeImage } from '../main/services/library.mjs';
+import {
+  findFreeSpot, snapPosition, tightBounds, validateCanvas, tooClose, asRect, overlaps,
+} from '../renderer/src/lib/geom.js';
 
 const TMP = path.join(os.tmpdir(), 'pixcake-tiler-e2e');
 fs.rmSync(TMP, { recursive: true, force: true });
@@ -235,6 +238,225 @@ H('⑥ 兜底：像素蛋糕如果改了尺寸怎么办');
   try { await splitCanvas({ returnedFile: weirdFile, manifest, outDir: path.join(TMP, 'split-weird') }); }
   catch { threw = true; }
   ok(threw, '宽高比改变时拒绝切分并报错（绝不猜着切）');
+}
+
+// ─────────────────────── 7. 排版 v2：混横竖 + 旋转 + 全局最优 ───────────────────────
+H('⑦ 排版 v2：混横竖装箱 · 可旋转 · 全局最少画布数');
+
+{
+  const M4L = (i) => mk('L' + i, 7008, 4672);      // A7M4 横
+  const M4P = (i) => mk('P' + i, 4672, 7008);      // A7M4 竖
+
+  // 同尺寸网格只能 2 张，横竖混搭能到 3 张 —— 这是 v2 的核心增益
+  const two = packCanvas([M4L(0), M4L(1)], { limit: 12000, gutter: 24 });
+  ok(two.placed.length === 2, 'A7M4 两张横图 2 张（同尺寸上限）', `${two.width}×${two.height}`);
+
+  const three = packCanvas([M4L(0), M4P(0), M4P(1)], { limit: 12000, gutter: 24 });
+  ok(three.placed.length === 3, 'A7M4 混横竖能放进 3 张', `${three.width}×${three.height} · ${three.strategy}`);
+  ok(three.width <= 12000 && three.height <= 12000, '混横竖画布未超限', `${three.width}×${three.height}`);
+  { let ov = false; try { assertNoOverlap(three.placed); } catch { ov = true; } ok(!ov, '混横竖摆放无重叠'); }
+
+  const four = packCanvas([M4L(0), M4L(1), M4P(0), M4P(1)], { limit: 12000, gutter: 24 });
+  ok(four.placed.length === 3, 'A7M4 4 张放不下（上限就是 3，几何决定）', `实际放下 ${four.placed.length}`);
+
+  const r3 = packCanvas([mk('a', 7952, 5304), mk('b', 5304, 7952), mk('c', 5304, 7952)], { limit: 12000, gutter: 24 });
+  ok(r3.placed.length === 2, 'A7R 42MP 混横竖也最多 2 张', `实际放下 ${r3.placed.length}`);
+}
+
+{
+  const M4L = (i) => mk('L' + i, 7008, 4672);
+  const M4P = (i) => mk('P' + i, 4672, 7008);
+  const mixed = planGroups([...Array.from({ length: 20 }, (_, i) => M4L(i)), ...Array.from({ length: 20 }, (_, i) => M4P(i))],
+    { limit: 12000, gutter: 24 });
+  const allL = planGroups(Array.from({ length: 40 }, (_, i) => M4L(i)), { limit: 12000, gutter: 24 });
+
+  ok(mixed.canvases.length < allL.canvases.length, '混横竖比全横显著更省画布',
+    `混 ${mixed.canvases.length} 张（省 ${(100 - mixed.canvases.length / 40 * 100).toFixed(0)}%）vs 全横 ${allL.canvases.length} 张（省 ${(100 - allL.canvases.length / 40 * 100).toFixed(0)}%）`);
+  ok(mixed.canvases.reduce((s, c) => s + c.placed.length, 0) === 40, '混横竖没有丢图');
+  { let bad = 0; for (const c of mixed.canvases) { try { assertNoOverlap(c.placed); } catch { bad++; } } ok(bad === 0, '混横竖每张画布都无重叠'); }
+  ok(mixed.canvases.every((c) => c.width <= 12000 && c.height <= 12000), '混横竖每张画布都未超限');
+  ok(allL.canvases.every((c) => c.placed.every((p) => (p.rotation ?? 0) === 0)), '默认不旋转任何照片');
+
+  const rot = planGroups(Array.from({ length: 40 }, (_, i) => M4L(i)), { limit: 12000, gutter: 24, allowRotate: true });
+  ok(rot.canvases.length < allL.canvases.length, '允许 90° 旋转后画布数进一步下降',
+    `${allL.canvases.length} → ${rot.canvases.length} 张`);
+  const rotCount = rot.canvases.reduce((s, c) => s + c.placed.filter((p) => p.rotation === 90).length, 0);
+  ok(rotCount > 0, '确实有照片被旋转', `${rotCount} 张`);
+  ok(rot.canvases.every((c) => c.placed.every((p) => p.rotation !== 90 || (p.w === p.natural.height && p.h === p.natural.width))),
+    '旋转的照片严格宽高互换（整数像素重排 = 无损）');
+  ok(rot.canvases.every((c) => c.placed.every((p) => p.w * p.h === p.natural.width * p.natural.height)),
+    '旋转没有改变像素总数');
+}
+
+{
+  const cap = capacityExplain([{ id: 'x', width: 7952, height: 5304 }], 12000, 24);
+  ok(cap.max === 2, '容量说明：42MP 一张画布上限 2 张', `max=${cap.max}`);
+  ok(cap.rows.some((r) => r.ok) && cap.rows.some((r) => !r.ok),
+    '容量说明同时列出"放得下"和"差多少"两种摆法', cap.rows.map((r) => r.text.replace(/ /g, '') + (r.ok ? '✔' : '✘')).join(' '));
+  const cap24 = capacityExplain([{ id: 'x', width: 6000, height: 4000 }], 12000, 24);
+  ok(cap24.max === 2, '容量说明诚实反映保护带的代价：6000×4000 留 24px 缝时只能 2 张（缝为 0 才能 6 张）', `max=${cap24.max}`);
+}
+
+// ─────────────────────── 8. 拖动落点几何 ───────────────────────
+H('⑧ 拖动：跟手 + 松手自动找空位 + 画布可长大');
+
+{
+  const others = [{ id: 'a', x: 0, y: 0, w: 1000, h: 800 }];
+  const size = { width: 500, height: 400 };
+  const origin = { x: 0, y: 0 };
+
+  const legal = findFreeSpot({ x: 2000, y: 2000 }, size, others, 12000, 24, origin);
+  ok(legal.x === 2000 && legal.y === 2000 && !legal.moved, '合法落点原样保留（不再被硬推挤）', `(${legal.x},${legal.y})`);
+
+  const blocked = findFreeSpot({ x: 200, y: 200 }, size, others, 12000, 24, origin);
+  ok(!blocked.failed, '落在别人身上时能找到替代位置');
+  const bx = asRect({ x: blocked.x, y: blocked.y, w: size.width, h: size.height });
+  ok(!overlaps(bx, asRect(others[0])), '替代位置不与别人重叠', `(${blocked.x},${blocked.y})`);
+  ok(!tooClose(bx, asRect(others[0]), 24), '替代位置留足了保护带', `(${blocked.x},${blocked.y})`);
+
+  const far = findFreeSpot({ x: 9000, y: 9000 }, size, others, 12000, 24, origin);
+  ok(far.x === 9000 && far.y === 9000, '把图拖到远处（画布随之长大）不被拦', `(${far.x},${far.y})`);
+
+  const clamped = findFreeSpot({ x: 99999, y: 99999 }, size, others, 12000, 24, origin);
+  ok(clamped.x + size.width <= 12000 && clamped.y + size.height <= 12000,
+    '落点被限制在 12000 单边上限内', `(${clamped.x},${clamped.y})`);
+
+  const near = findFreeSpot({ x: 1004, y: 0 }, size, others, 12000, 24, origin);
+  ok(!tooClose(asRect({ x: near.x, y: near.y, w: size.width, h: size.height }), asRect(others[0]), 24),
+    '贴着别人放会被挪到留出保护带的位置', `(${near.x},${near.y})`);
+
+  // 真的挤满时：宁可不动，也绝不留下重叠
+  const full = Array.from({ length: 3 }, (_, i) => ({ id: 'f' + i, x: i * 4024, y: 0, w: 4000, h: 11976 }));
+  const noRoom = findFreeSpot({ x: 100, y: 100 }, { width: 4000, height: 11976 }, full, 12000, 24, { x: 0, y: 0 });
+  ok(noRoom.failed, '实在没地方时明确报告失败（不静默留下重叠）', `(${noRoom.x},${noRoom.y}) failed=${noRoom.failed}`);
+
+  const tb = tightBounds([{ x: 0, y: 0, w: 100, h: 50 }, { x: 200, y: 80, w: 100, h: 50 }]);
+  ok(tb.width === 300 && tb.height === 130, '画布尺寸 = 内容紧包围盒（拖动后跟着变）', `${tb.width}×${tb.height}`);
+
+  const snapped = snapPosition({ x: 3, y: 1000 }, size, others, 12000, 20, 24);
+  ok(snapped.x === 0, '靠近边缘时轻微吸附到 0', `x=${snapped.x}`);
+
+  const probs = validateCanvas([
+    { id: 'a', x: 0, y: 0, width: 100, height: 100 },
+    { id: 'b', x: 50, y: 50, width: 100, height: 100 },
+  ], 24);
+  ok(probs.some((p) => p.type === 'overlap'), '重叠能被检出并阻止导出');
+}
+
+// ─────────────────────── 9. 旋转往返：合成 → 切分 ───────────────────────
+H('⑨ 旋转 90° 排版：合成后必须能原样转回来');
+
+{
+  const rotSrc = path.join(TMP, 'rot-src.jpg');
+  await sharp({ create: { width: 1000, height: 600, channels: 3, background: { r: 30, g: 90, b: 160 } } })
+    .composite([{
+      input: Buffer.from('<svg width="1000" height="600"><rect x="40" y="40" width="300" height="120" fill="#fff"/><circle cx="700" cy="400" r="150" fill="#e8b46a"/></svg>'),
+      top: 0, left: 0,
+    }])
+    .jpeg({ quality: 94, chromaSubsampling: '4:4:4' }).toFile(rotSrc);
+  const rp = await probeImage(rotSrc);
+
+  const rotCanvas = path.join(TMP, 'TILE_rot.tif');
+  await composeCanvas({
+    items: [{ source: rotSrc, probe: rp, rotation: 90, crop: { left: 0, top: 0, width: rp.height, height: rp.width } }],
+    width: rp.height, height: rp.width, gutter: 24, outFile: rotCanvas, icc: 'srgb', compression: 'lzw',
+  });
+  const rm = await sharp(rotCanvas).metadata();
+  ok(rm.width === rp.height && rm.height === rp.width, '画布里的这张是宽高互换的', `${rm.width}×${rm.height}`);
+
+  const rotManifest = {
+    version: 2, canvas: { width: rm.width, height: rm.height }, gutter: 24,
+    items: [{
+      id: 'r1', name: 'rot-src.jpg', source: rotSrc, format: 'jpeg', rotation: 90,
+      natural: { width: rp.width, height: rp.height },
+      crop: { left: 0, top: 0, width: rp.height, height: rp.width },
+    }],
+  };
+  const rotOut = path.join(TMP, 'split-rot');
+  const rrep = await splitCanvas({ returnedFile: rotCanvas, manifest: rotManifest, outDir: rotOut, format: 'tiff', keepExif: false });
+  const backFile = path.join(rotOut, 'rot-src.tif');
+  const om = await sharp(backFile, { unlimited: true }).metadata();
+  ok(om.width === rp.width && om.height === rp.height, '切分时自动转回原朝向', `${om.width}×${om.height}`);
+  ok(rrep.outputs[0].lossless, '旋转切分仍判定为无损', rrep.outputs[0].size);
+
+  // 像素级：转回来的必须和原图逐像素一致（TIFF 输出，无重编码损失）
+  const origRaw = await sharp(rotSrc, { unlimited: true }).removeAlpha().raw().toBuffer();
+  const backRaw = await sharp(backFile, { unlimited: true }).removeAlpha().raw().toBuffer();
+  let maxd = 0;
+  for (let i = 0; i < origRaw.length; i++) { const d = Math.abs(origRaw[i] - backRaw[i]); if (d > maxd) maxd = d; }
+  ok(maxd === 0, '旋转往返后逐像素完全一致（旋转是整数像素重排）', `最大偏差 ${maxd}`);
+}
+
+// ─────────────────────── 10. EXIF 朝向：竖拍照片不能躺倒 ───────────────────────
+H('⑩ EXIF 朝向：导入烤平后必须把 Orientation 归一到 1');
+
+/** 手工构造 EXIF 载荷（sharp 的 withExif 会强制覆盖 Orientation，造不出竖拍样本） */
+function exifWith(orientation, make = 'Sony') {
+  const T = 6;
+  const makeBytes = Buffer.from(make + '\0', 'latin1');
+  const entries = [
+    { tag: 0x010f, type: 2, count: makeBytes.length, data: makeBytes },
+    { tag: 0x0112, type: 3, count: 1, inline: orientation },
+  ].sort((a, b) => a.tag - b.tag);
+  const n = entries.length;
+  const ifdOffset = 8;
+  const ifdSize = 2 + n * 12 + 4;
+  const buf = Buffer.alloc(T + ifdOffset + ifdSize + makeBytes.length);
+  buf.write('Exif\0\0', 0, 'latin1');
+  buf.write('II', T, 'latin1');
+  buf.writeUInt16LE(42, T + 2);
+  buf.writeUInt32LE(ifdOffset, T + 4);
+  const ifd = T + ifdOffset;
+  buf.writeUInt16LE(n, ifd);
+  let dp = T + ifdOffset + ifdSize;
+  entries.forEach((e, i) => {
+    const o = ifd + 2 + i * 12;
+    buf.writeUInt16LE(e.tag, o);
+    buf.writeUInt16LE(e.type, o + 2);
+    buf.writeUInt32LE(e.count, o + 4);
+    if (e.inline != null) buf.writeUInt16LE(e.inline, o + 8);
+    else { buf.writeUInt32LE(dp - T, o + 8); e.data.copy(buf, dp); dp += e.data.length; }
+  });
+  buf.writeUInt32LE(0, ifd + 2 + n * 12);
+  return buf;
+}
+
+{
+  const base = await sharp({ create: { width: 800, height: 534, channels: 3, background: { r: 200, g: 120, b: 80 } } })
+    .jpeg({ quality: 94 }).toBuffer();
+  const portrait = path.join(TMP, 'portrait.jpg');
+  fs.writeFileSync(portrait, injectExif(base, exifWith(6)));
+
+  const pp = await probeImage(portrait);
+  ok(pp.orientation === 6 && pp.width === 534 && pp.height === 800,
+    '导入时识别为竖拍并互换宽高', `${pp.width}×${pp.height} orientation=${pp.orientation}`);
+
+  const direct = normalizeOrientation(extractExif(fs.readFileSync(portrait)), 1);
+  ok(exifReader(direct).Image?.Orientation === 1, 'normalizeOrientation 把朝向改成 1');
+  ok(exifReader(direct).Image?.Make === 'Sony', '归一朝向不影响其它标签', exifReader(direct).Image?.Make);
+
+  const pf = path.join(TMP, 'TILE_portrait.tif');
+  await composeCanvas({
+    items: [{ source: portrait, probe: pp, rotation: 0, crop: { left: 0, top: 0, width: pp.width, height: pp.height } }],
+    width: pp.width, height: pp.height, gutter: 24, outFile: pf, icc: 'srgb', compression: 'lzw',
+  });
+  const pManifest = {
+    version: 2, canvas: { width: pp.width, height: pp.height }, gutter: 24,
+    items: [{
+      id: 'p1', name: 'portrait.jpg', source: portrait, format: 'jpeg', rotation: 0,
+      natural: { width: pp.width, height: pp.height },
+      crop: { left: 0, top: 0, width: pp.width, height: pp.height },
+    }],
+  };
+  const pOut = path.join(TMP, 'split-portrait');
+  await splitCanvas({ returnedFile: pf, manifest: pManifest, outDir: pOut, format: 'jpeg', quality: 14, keepExif: true });
+  const outFile = path.join(pOut, 'portrait.jpg');
+  const oExif = exifReader(extractExif(fs.readFileSync(outFile)));
+  const omd = await sharp(outFile).metadata();
+  ok((oExif.Image?.Orientation ?? 1) === 1,
+    '搬回 EXIF 时朝向已归一到 1（否则访达/微信会再转一次，竖拍照片躺倒）', `Orientation=${oExif.Image?.Orientation ?? 1}`);
+  ok(omd.width === pp.width && omd.height === pp.height, '输出像素尺寸与原图一致', `${omd.width}×${omd.height}`);
+  ok(oExif.Image?.Make === 'Sony', '朝向归一后其它 EXIF 仍然保真', oExif.Image?.Make);
 }
 
 // ─────────────────────── 结果 ───────────────────────

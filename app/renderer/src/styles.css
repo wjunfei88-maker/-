@@ -395,3 +395,104 @@ input { user-select: text; }
 .seg button:hover:not(:disabled) { color: var(--txt-1); }
 .seg button.on { background: rgba(255, 255, 255, 0.12); color: var(--txt-1); font-weight: 520; }
 .seg button:disabled { opacity: 0.25; }
+
+/* ═══════════ 画布列表（左栏下半部分）═══════════ */
+.canvaslist {
+  border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; min-height: 0;
+  max-height: 46%; flex: 0 0 auto;
+}
+.cl-summary {
+  display: flex; align-items: center; gap: 9px;
+  padding: 11px 16px 8px; font-size: 11.5px; color: var(--txt-3);
+}
+.cl-summary b { color: var(--txt-1); font-family: var(--mono); font-weight: 520; }
+.cl-summary .sep { width: 1px; height: 11px; background: var(--line-hi); }
+.cl-rows { overflow-y: auto; padding: 0 10px 12px; display: flex; flex-direction: column; gap: 3px; }
+.cl-row {
+  display: grid; grid-template-columns: 20px 36px 1fr auto;
+  align-items: center; gap: 8px; padding: 5px 7px;
+  border-radius: var(--r-sm); border: 0.5px solid transparent;
+  text-align: left; width: 100%;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.cl-row:hover { background: var(--bg-card); }
+.cl-row.on { background: var(--accent-dim); border-color: var(--accent-line); }
+.cl-idx { font-family: var(--mono); font-size: 10.5px; color: var(--txt-3); text-align: right; }
+.cl-row.on .cl-idx { color: var(--accent); }
+.cl-thumb {
+  width: 36px; height: 25px; border-radius: 4px; overflow: hidden;
+  background: rgba(0, 0, 0, 0.42); display: block;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.cl-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cl-meta { min-width: 0; display: flex; flex-direction: column; line-height: 1.35; }
+.cl-count { font-size: 11.5px; }
+.cl-dim { font-family: var(--mono); font-size: 10px; color: var(--txt-3); }
+.cl-flag { font-size: 10px; color: transparent; }
+.cl-row.bad .cl-flag { color: var(--danger); }
+.cl-row.bad { border-color: rgba(234, 125, 116, 0.34); }
+
+/* ═══════════ 容量说明 ═══════════ */
+.cap-head { display: flex; align-items: baseline; gap: 11px; margin-bottom: 11px; }
+.cap-big {
+  font-family: var(--mono); font-size: 31px; font-weight: 600;
+  color: var(--accent); line-height: 1; letter-spacing: -0.02em;
+}
+.cap-txt { font-size: 11.5px; color: var(--txt-2); line-height: 1.45; }
+.cap-txt .muted { color: var(--txt-3); font-family: var(--mono); font-size: 10.5px; }
+.cap-rows { display: flex; flex-direction: column; }
+.cap-row {
+  display: grid; grid-template-columns: 1fr auto auto; gap: 9px;
+  align-items: baseline; font-size: 11px; color: var(--txt-2);
+  padding: 5px 0; border-top: 0.5px solid var(--line);
+}
+.cap-row .mono { font-family: var(--mono); font-size: 10.5px; color: var(--txt-3); }
+.cap-row.off { opacity: 0.45; }
+.cap-row .ok { color: var(--ok); }
+.cap-row .bad { color: var(--danger); }
+
+/* ═══════════ 开关行 ═══════════ */
+.switch-row { display: flex; gap: 9px; align-items: flex-start; font-size: 12.5px; line-height: 1.4; }
+.switch-row input { margin-top: 3px; flex: none; accent-color: var(--accent); }
+.switch-row > span { min-width: 0; }
+.switch-row b { font-weight: 560; }
+
+/* ═══════════ 画布上的旋转标记 ═══════════ */
+.canvas-item { cursor: grab; }
+.canvas-item:active { cursor: grabbing; }
+.canvas-item.colliding {
+  outline: 2px solid var(--danger);
+  box-shadow: 0 0 0 5px rgba(234, 125, 116, 0.3), 0 10px 30px rgba(0, 0, 0, 0.5);
+  z-index: 4;
+}
+.canvas-item .rot-badge {
+  position: absolute; left: 5px; top: 5px; width: 19px; height: 19px;
+  border-radius: 6px; background: rgba(221, 164, 92, 0.88); color: #2a1d0b;
+  font-size: 11px; display: grid; place-items: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.rot-tag {
+  margin-left: 6px; font-family: var(--mono); font-size: 10px;
+  color: var(--accent); background: var(--accent-dim);
+  padding: 1px 5px; border-radius: 4px;
+}
+.stage.dragging .canvas-item { transition: none; }
+
+/* ═══════════ 舞台提示条 ═══════════ */
+.stage-warn {
+  position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+  max-width: 72%; text-align: center;
+  padding: 7px 13px; border-radius: 9px; font-size: 12px;
+  background: rgba(221, 164, 92, 0.14);
+  border: 0.5px solid var(--accent-line);
+  color: var(--accent-hi);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  pointer-events: none;
+}
+.stage-warn.danger {
+  background: rgba(232, 119, 111, 0.14);
+  border-color: rgba(232, 119, 111, 0.45);
+  color: #f0a49e;
+}

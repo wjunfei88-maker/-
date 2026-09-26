@@ -20,17 +20,70 @@ const Field = ({ label, children }) => (
 export default function Inspector(p) {
   const {
     items, canvas, hint, gutter, setGutter, problems, selectedId, onMove, onRemove,
-    exp, setExp, onCompose, busy,
+    allowRotate, setAllowRotate, rotCount, capacity, canvasCount, maxPerCanvas,
+    exp, setExp, onCompose, onComposeAll, busy,
     rec, setRec, onRecover, onPickReturned, onPickOutDir,
     library, onForget, onReveal, onReuseBatch,
   } = p;
 
   const over = canvas.width > 12000 || canvas.height > 12000;
+  const blocked = over || problems.length > 0 || !items.length;
+  // 大数字取"几何上限"和"这批实际排到的"里更大的那个：
+  //   · 同尺寸网格算出来的上限（capacity.max）
+  //   · 横竖混搭实际塞进去的张数（maxPerCanvas）—— A7M4 会比网格多 1 张
+  const capMax = Math.max(maxPerCanvas || 0, capacity?.max || 0);
 
   return (
     <aside className="inspector">
+      {/* ── 容量说明：为什么一张画布只能放 N 张 ── */}
+      {capacity && capacity.max > 0 && (
+        <>
+          <div className="section-head"><span className="section-title">一张画布能放几张</span></div>
+          <div className="insp-group">
+            <div className="card">
+              <div className="cap-head">
+                <span className="cap-big">{capMax}</span>
+                <span className="cap-txt">
+                  张 / 画布<br />
+                  <span className="muted">{capacity.size} 单张尺寸</span>
+                </span>
+              </div>
+              <div className="cap-rows">
+                {capacity.rows.map((r) => (
+                  <div key={r.text} className={`cap-row${r.ok ? '' : ' off'}`}>
+                    <span>{r.text}</span>
+                    <span className="mono">{r.width}×{r.height}</span>
+                    <span className={r.ok ? 'ok' : 'bad'}>
+                      {r.ok ? `${r.count} 张 ✔` : `超 ${r.overBy}px`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {maxPerCanvas > capacity.max && (
+                <div className="hint ok" style={{ color: 'var(--ok)' }}>
+                  横竖混搭的装箱比同尺寸网格多塞了 {maxPerCanvas - capacity.max} 张 —— 这就是「智能排版」在帮你省的地方。
+                </div>
+              )}
+              {canvasCount > 0 && maxPerCanvas > 0 && (
+                <div className="hint">
+                  你这批照片：一张画布实际排到 <b>{maxPerCanvas}</b> 张，共排成 <b>{canvasCount}</b> 张画布
+                  （一张画布 = 像素蛋糕的一次额度）。
+                </div>
+              )}
+              <div className="hint">
+                像素蛋糕的限制是 <b>单边 12000px</b>，不是总面积。所以"能拼几张"首先是几何问题，
+                不是软件没优化。想再往上塞就只有缩放照片（违背 1:1 不缩放），默认不做。
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
       {/* ── 画布 ── */}
-      <div className="section-head"><span className="section-title">画布</span></div>
+      <div className="section-head">
+        <span className="section-title">当前画布</span>
+        {canvasCount > 1 && <span className="count-pill">{items.length} 张</span>}
+      </div>
       <div className="insp-group">
         <div className="card">
           <KV k="尺寸" v={canvas.width && canvas.height ? `${canvas.width} × ${canvas.height}` : '—'} tone={over ? 'danger' : ''} />
@@ -42,6 +95,11 @@ export default function Inspector(p) {
             <span>画布填充率</span>
             <b>{hint ? `${hint.utilPct.toFixed(1)}%` : '—'}</b>
           </div>
+          {hint && (
+            <div className="hint" style={{ marginTop: 8 }}>
+              还能往外拖的余量：<b className="mono">{hint.remainW} × {hint.remainH}</b> px
+            </div>
+          )}
         </div>
 
         <div className="card">
@@ -55,15 +113,33 @@ export default function Inspector(p) {
             </div>
           </Field>
           <div className="hint">
-            两张图之间留的缝，缝里填的是各自的边缘镜像。
+            两张图之间留的缝，缝里填的是**各自的边缘镜像**。
             实测液化会在整个画布上产生约 1px 的位移场，24px 足够把它挡在缝里。
+            改大改小会立刻重排。⚠️ 缝隙很吃空间：缝为 0 时 6000×4000 能放 6 张，缝为 24 时只能放 2 张。
           </div>
+        </div>
+
+        <div className="card">
+          <label className="switch-row">
+            <input type="checkbox" checked={allowRotate} onChange={(e) => setAllowRotate(e.target.checked)} />
+            <span>
+              <b>允许旋转 90° 塞得更紧</b>
+              <span className="hint" style={{ marginTop: 3, display: 'block' }}>
+                旋转是整数像素重排，**完全无损**，切回原图时会自动转正。
+                但画布里的脸是躺着的，像素蛋糕的人脸识别可能认不出。
+                实测：40 张竖拍/横拍混合，开启后画布从 20 张降到 14 张。建议先小批量试。
+              </span>
+            </span>
+          </label>
+          {allowRotate && rotCount > 0 && (
+            <div className="hint warn">当前有 {rotCount} 张被旋转了 90°。</div>
+          )}
         </div>
 
         {over && (
           <div className="card" style={{ borderColor: 'rgba(232,119,111,0.4)' }}>
             <div className="hint danger">
-              画布超出 12000px 单边上限，像素蛋糕会拒绝导入。用「自动排版」重新分组，或把图片拖近一点。
+              画布超出 12000px 单边上限，像素蛋糕会拒绝导入。把图片往回拖，或点「自动排版」重新分组。
             </div>
           </div>
         )}
@@ -71,7 +147,7 @@ export default function Inspector(p) {
           <div className="card" style={{ borderColor: 'rgba(232,119,111,0.4)' }}>
             <div className="hint danger">
               {problems[0].type === 'overlap'
-                ? '有两张图重叠了。重叠意味着被压住的像素在画布里根本不存在，切分时无处可取 —— 必须分开。'
+                ? '有两张图重叠了。重叠意味着被压住的像素在画布里根本不存在，切分时无处可取 —— 拖开它们后才能导出。'
                 : '两张图之间没有留出保护带的间距。'}
             </div>
           </div>
@@ -84,13 +160,14 @@ export default function Inspector(p) {
         <span className="count-pill">{items.length}</span>
       </div>
       <div className="insp-group">
-        {items.length === 0 && <div className="hint" style={{ padding: '2px 0 10px' }}>还没有图片。导入后点「自动排版」。</div>}
+        {items.length === 0 && <div className="hint" style={{ padding: '2px 0 10px' }}>这张画布还没有图片。导入后点「自动排版」。</div>}
         {items.map((it) => (
           <div className="card" key={it.id}
             style={selectedId === it.id ? { borderColor: 'var(--accent-line)', background: 'var(--accent-dim)' } : undefined}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 7 }}>
               <span style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {it.name}
+                {it.rotation === 90 && <span className="rot-tag">↻90°</span>}
               </span>
               <button className="btn ghost sm icon" onClick={() => onRemove(it.id)} title="从画布移除">✕</button>
             </div>
@@ -107,7 +184,7 @@ export default function Inspector(p) {
               ))}
             </div>
             <div style={{ marginTop: 6, fontFamily: 'var(--mono)', fontSize: 10.5, color: 'var(--txt-3)' }}>
-              {it.width}×{it.height} · {((it.width * it.height) / 1e6).toFixed(1)}MP · 1:1
+              {(it.natural?.width ?? it.width)}×{(it.natural?.height ?? it.height)} · {((it.width * it.height) / 1e6).toFixed(1)}MP · 1:1
             </div>
           </div>
         ))}
@@ -142,10 +219,27 @@ export default function Inspector(p) {
               </select>
             </Field>
           </div>
-          <button className="btn primary" style={{ width: '100%', justifyContent: 'center', height: 32, marginTop: 4 }}
-            onClick={onCompose} disabled={busy || !items.length || over || problems.length > 0}>
-            导出合成图
-          </button>
+          {canvasCount > 1 ? (
+            <>
+              <button className="btn primary" style={{ width: '100%', justifyContent: 'center', height: 32, marginTop: 4 }}
+                onClick={onComposeAll} disabled={busy || blocked}>
+                全部导出 · {canvasCount} 张画布
+              </button>
+              <button className="btn" style={{ width: '100%', justifyContent: 'center', height: 30, marginTop: 6 }}
+                onClick={onCompose} disabled={busy || blocked}>
+                只导出当前这张
+              </button>
+              <div className="hint">
+                一次产出 {canvasCount} 个 TIFF + {canvasCount} 个 manifest，
+                文件名会带 <span className="mono">_c01 _c02</span> 后缀，方便和画布列表对上号。
+              </div>
+            </>
+          ) : (
+            <button className="btn primary" style={{ width: '100%', justifyContent: 'center', height: 32, marginTop: 4 }}
+              onClick={onCompose} disabled={busy || blocked}>
+              导出合成图
+            </button>
+          )}
           <div className="hint">
             导出 TIFF 后直接丢进像素蛋糕，修完**不要改文件名**导出到同一目录，再回来点「切回原图」。
           </div>
@@ -195,7 +289,7 @@ export default function Inspector(p) {
           </div>
           <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--txt-2)', margin: '2px 0 9px' }}>
             <input type="checkbox" checked={rec.keepExif} onChange={(e) => setRec({ ...rec, keepExif: e.target.checked })} />
-            把原图的 EXIF 搬回来（并摘掉内嵌的旧缩略图）
+            把原图的 EXIF 搬回来（摘掉旧缩略图 + 朝向归一）
           </label>
           <button className="btn primary" style={{ width: '100%', justifyContent: 'center', height: 32 }}
             onClick={onRecover} disabled={busy || !rec.returnedFile || !rec.matched}>
@@ -216,7 +310,7 @@ export default function Inspector(p) {
               <div className="batch" key={b.id}>
                 {b.previewFile
                   ? <img src={pcfile(b.previewFile)} alt="" />
-                  : <div style={{ width: 40, height: 30, borderRadius: 5, background: '#2a2a2e' }} />}
+                  : <div style={{ width: 44, height: 32, borderRadius: 5, background: '#2a2a2e' }} />}
                 <div className="batch-meta">
                   <div className="batch-name">{b.name}</div>
                   <div className="batch-sub">{b.canvas.width}×{b.canvas.height} · {b.count}张</div>

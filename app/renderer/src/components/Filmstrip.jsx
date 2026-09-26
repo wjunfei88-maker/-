@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 
-/** 左栏底片条：已导入的照片，以及它们是否已经放上画布 */
+/** 左栏底片条：已导入的照片，以及它们是否已经放上画布（外层 aside 由 App 提供） */
 export default function Filmstrip({ images, placedIds, selectedId, onSelect, onRemove, onAdd, onAutoLayout, onClear }) {
   const [hot, setHot] = useState(false);
 
@@ -12,7 +12,7 @@ export default function Filmstrip({ images, placedIds, selectedId, onSelect, onR
   };
 
   return (
-    <aside className="sidebar">
+    <>
       <div className="section-head">
         <span className="section-title">底片</span>
         <span className="count-pill">{images.length}</span>
@@ -68,6 +68,6 @@ export default function Filmstrip({ images, placedIds, selectedId, onSelect, onR
           </div>
         )}
       </div>
-    </aside>
+    </>
   );
 }

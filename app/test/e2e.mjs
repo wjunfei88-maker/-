@@ -877,35 +877,55 @@ ok('移除一条批次 = 那一次省下的额度从账上扣掉',
 ok('一批都没有时不炸、也不显示负数',
   summarizeLedger([], price).saved === 0 && summarizeLedger(null, price).money === 0);
 
-H('⑮ 批次进度：进度条不许先说"完事了"');
+H('⑮ 批次进度：一列进度条 + 进度条不许先说"完事了"');
 
-// 用户报的真 bug：三张画布并行，进度条冲到 100% 而"已完成"还是 0/3
-const allInternal = batchProgress({ total: 3, finished: 0, active: [1, 1, 1], running: [1, 2, 3] });
+const prog = (o) => batchProgress({ title: '正在切回原图', ...o });
+
+// 用户报的 bug ①：三张画布并行，进度条冲到 100% 而"已完成"还是 0/3
+const allInternal = prog({ total: 3, items: [{ pct: 1, state: 'running' }, { pct: 1, state: 'running' }, { pct: 1, state: 'running' }] });
 ok(allInternal.pct < 1, '三张内部都跑完但一张都没落盘 → 进度条不能是 100%', `${(allInternal.pct * 100).toFixed(1)}%`);
 ok(allInternal.pct > 0.9, '……但也不能显得还没干完', `${(allInternal.pct * 100).toFixed(1)}%`);
-ok(allInternal.finished === 0 && allInternal.message.includes('已完成 0/3'),
-  '"已完成"必须如实报 0', allInternal.message);
+ok(allInternal.title.includes('已完成 0/3'), '"已完成"必须如实报 0', allInternal.title);
 
-ok(batchProgress({ total: 3, finished: 3, active: [], running: [] }).pct === 1,
-  '全部落盘了才是 100%');
-ok(batchProgress({ total: 3, finished: 3 }).message === '3 张画布全部完成');
+ok(prog({ total: 3, items: [{ state: 'done' }, { state: 'done' }, { state: 'done' }] }).pct === 1, '全部落盘了才是 100%');
+ok(prog({ total: 2, items: [{ state: 'done' }, { state: 'done' }] }).title.endsWith('全部完成'));
 
-// 标题稳定性：同一批状态，无论 active 的插入顺序如何，文案必须一模一样
-const a = batchProgress({ total: 6, finished: 2, active: [0.5, 0.5, 0.5], running: [3, 4, 5] });
-const b = batchProgress({ total: 6, finished: 2, active: [0.5, 0.5, 0.5], running: [5, 3, 4] });
-ok(a.message === b.message, '标题不许跟着"哪一张刚发了消息"变', a.message);
-ok(a.message.includes('并行处理 3 张') && a.message.includes('已完成 2/6'), '并行时说清几张在跑', a.message);
+// 用户报的 bug ②：切回时把单张画布内部的百分比当成整批的百分比发出去
+const wrongScale = prog({ total: 25, items: Array.from({ length: 25 }, (_, i) => (i < 3 ? { state: 'done' } : i === 3 ? { pct: 0.4, state: 'running' } : { pct: 0, state: 'pending' })) });
+ok(wrongScale.pct > 0.12 && wrongScale.pct < 0.16,
+  '整批进度按"26 张里完了几张"算，不跟着某一张的内部百分比抽',
+  `${(wrongScale.pct * 100).toFixed(1)}%`);
 
-// 只剩一张在跑时说"第 N 张"，N 用真实序号
-const solo = batchProgress({ total: 6, finished: 2, active: [0.3], running: [1] });
-ok(solo.message.includes('第 1 张画布'), '只剩一张在跑就报它的序号', solo.message);
+// 一列进度条：条数 = 张数、顺序按序号、每张的 pct 和状态都对
+const rows = prog({
+  total: 3,
+  items: [
+    { label: '第 1 张', state: 'done', note: '6 张原图' },
+    { label: '第 2 张', pct: 0.62, state: 'running', note: '切分 3/6' },
+    { label: '第 3 张', pct: 0, note: '等待中' },
+  ],
+}).rows;
+ok(rows.length === 3, '一列进度条的张数 = 画布数');
+ok(rows.map((r) => r.index).join() === '0,1,2', '按序号排，不按谁先跑完排');
+ok(rows[0].pct === 1 && rows[0].state === 'done' && rows[0].note === '6 张原图', '完成的那行是满格');
+ok(rows[1].pct === 0.62 && rows[1].state === 'running', '正在跑的那行报自己的真实进度');
+ok(rows[2].state === 'pending' && rows[2].pct === 0, '还没轮到的那行是等待中');
+
+// 失败的也要满格并标出来（不然那行会永远停在半路，看着像卡住了）
+const withFail = prog({ total: 2, items: [{ state: 'failed', note: '找不到配套的 .manifest.json' }, { pct: 0.5 }] });
+ok(withFail.rows[0].pct === 1 && withFail.rows[0].state === 'failed', '失败的那行满格 + 标失败');
+ok(withFail.failed === 1 && withFail.finished === 1, '失败也算"处理完了"，否则总进度永远到不了头');
+
+// 张数对不上时补齐：items 少了也要有 N 行，不能少一行
+ok(prog({ total: 4, items: [{ state: 'done' }] }).rows.length === 4, 'items 缺的按"等待中"补足');
 
 // 脏输入不能把进度条搞成负数/超过 1/NaN
-const dirty = batchProgress({ total: 3, finished: 99, active: [-5, 'x', null], running: [] });
-ok(dirty.pct === 1 && dirty.finished === 3, 'finished 越界要被夹回 0..total', JSON.stringify(dirty));
+const dirty = prog({ total: 3, items: [{ state: 'done' }, { state: 'done' }, { state: 'done' }, { state: 'done' }] });
+ok(dirty.pct === 1 && dirty.total === 3 && dirty.finished === 3, 'finished 越界要被夹回 0..total');
 const zero = batchProgress({});
 ok(zero.pct >= 0 && zero.pct <= 1 && Number.isFinite(zero.pct), '空输入不产出 NaN', zero.pct);
-ok(batchProgress({ total: 3, finished: 0, active: [2] }).pct < 1, '单张内部进度给了 2 也只算 0.99');
+ok(prog({ total: 1, items: [{ pct: 2 }] }).pct < 1, '单张内部进度给了 2 也只算 0.99');
+ok(prog({ total: 1, items: [{ pct: -5 }] }).pct === 0, '负进度当 0，不能变成负数进度条');
 
 H('结果');
 console.log(`  通过 ${pass} 项，失败 ${fail} 项`);

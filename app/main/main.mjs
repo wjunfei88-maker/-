@@ -381,7 +381,8 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
 
   const done = [];
   const failed = [];
-  const active = new Map();        // index → 该画布内部的进度 0..1
+  // 每张画布在浮层上占**一行进度条**，这里就是那一行的状态
+  const slots = jobs.map((_, i) => ({ label: `第 ${i + 1} 张`, pct: 0, state: 'pending', note: '等待中' }));
   const liveTimings = new Map();   // index → 该画布当前的阶段耗时
   let lastDone = null;             // { index, timings } 最近完成的那张
 
@@ -392,7 +393,7 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
    * 规则：有在跑的就取序号最小的那张；全在收尾了就显示最近完成的那张。
    */
   const pickTimings = () => {
-    const running = [...active.keys()].sort((a, b) => a - b);
+    const running = slots.map((s, i) => (s.state === 'running' ? i : -1)).filter((i) => i >= 0);
     if (running.length) {
       const i = running[0];
       return { title: `阶段耗时（第 ${i + 1} 张画布）`, timings: liveTimings.get(i) ?? [], live: true };
@@ -402,16 +403,13 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
   };
 
   const broadcast = (extra) => {
-    const finished = done.length + failed.length;
-    const running = [...active.keys()].sort((a, b) => a - b).map((i) => i + 1);
     // 数字怎么算全部收在 progress.mjs 里（对着单测改，别在这里现推）
-    const p = batchProgress({ total: jobs.length, finished, active: [...active.values()], running });
-
+    const p = batchProgress({ title: '正在导出画布', total: jobs.length, items: slots });
     const t = pickTimings();
     send('progress', {
-      stage: 'batch', pct: p.pct, message: p.message,
+      stage: 'batch', pct: p.pct, message: p.title, rows: p.rows,
       timings: t.timings, timingsTitle: t.title, timingsLive: t.live,
-      workers: plan.workers, finished: p.finished, total: p.total, running,
+      workers: plan.workers, finished: p.finished, failed: p.failed, total: p.total,
       ...extra,
     });
   };
@@ -420,15 +418,21 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
   broadcast({ title: `并行 ${plan.workers} 个进程（${plan.reason}）` });
 
   const finalize = (job, r) => {
-    active.delete(job.index);
     liveTimings.delete(job.index);
     lastDone = { index: job.index, timings: r?.timings ?? [] };
     try {
       const entry = recordExport({ payload: job.payload, id: job.id, safe: job.safe, base: job.base, outDir, ...r });
       done.push({ index: job.index, ...entry });
+      slots[job.index] = { ...slots[job.index], pct: 1, state: 'done', note: `${entry.count} 张照片` };
     } catch (e) {
       failed.push({ index: job.index, error: e.message });
+      slots[job.index] = { ...slots[job.index], pct: 1, state: 'failed', note: e.message };
     }
+  };
+  const markFailed = (job, error) => {
+    liveTimings.delete(job.index);
+    failed.push({ index: job.index, error });
+    slots[job.index] = { ...slots[job.index], pct: 1, state: 'failed', note: error };
   };
 
   if (!useWorkers) {
@@ -439,15 +443,14 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
           payload: job.payload, base: job.base,
           panelConcurrency: perPanel,
           onProgress: (p) => {
-            active.set(job.index, p.pct ?? 0);
+            slots[job.index] = { ...slots[job.index], pct: p.pct ?? 0, state: 'running', note: p.message ?? '' };
             liveTimings.set(job.index, p.timings ?? []);
             broadcast({});
           },
         });
         finalize(job, r);
       } catch (e) {
-        active.delete(job.index);
-        failed.push({ index: job.index, error: e.message });
+        markFailed(job, e.message);
       }
     }
   } else {
@@ -459,7 +462,7 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
         const r = await runOneInWorker({
           job, total: jobs.length,
           onProgress: ({ progress }) => {
-            active.set(job.index, progress.pct ?? 0);
+            slots[job.index] = { ...slots[job.index], pct: progress.pct ?? 0, state: 'running', note: progress.message ?? '' };
             liveTimings.set(job.index, progress.timings ?? []);
             broadcast({});
           },
@@ -470,7 +473,7 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
           // 否则"已完成 N/M"要等到下一张画布有进度时才更新 —— 最后一张永远追不上，
           // 浮层会一直停在旧数字上（实测 3 张并行时曾停在 0/3）。
           broadcast({});
-        } else { active.delete(job.index); failed.push({ index: job.index, error: r.error }); broadcast({}); }
+        } else { markFailed(job, r.error); broadcast({}); }
       }
     };
     await Promise.all(Array.from({ length: Math.min(plan.workers, jobs.length) }, worker));
@@ -577,16 +580,44 @@ ipcMain.handle('recover:splitMany', async (_e, payload) => {
 
   const done = [];
   const failed = [];
-  let finishedFiles = 0;
+  // 和导出一样：每张画布在浮层上占一行进度条
+  const slots = files.map((f, i) => ({
+    label: `第 ${i + 1} 张`, pct: 0, state: 'pending', note: path.basename(f),
+  }));
+  const liveTimings = new Map();
+  let lastDone = null;
+
+  const pickTimings = () => {
+    const running = slots.map((s, i) => (s.state === 'running' ? i : -1)).filter((i) => i >= 0);
+    if (running.length) {
+      const i = running[0];
+      return { title: `阶段耗时（第 ${i + 1} 张画布）`, timings: liveTimings.get(i) ?? [], live: true };
+    }
+    if (lastDone) return { title: `阶段耗时（第 ${lastDone.index + 1} 张，已完成）`, timings: lastDone.timings, live: false };
+    return { title: '', timings: [], live: false };
+  };
+
+  /**
+   * 这里**只发整批的百分比**。
+   * 旧代码在 onProgress 里把单张画布内部的 p 整个 spread 出去，
+   * p.pct 是"这一张切到第几张"（0..1），却被当成整批进度显示 ——
+   * 于是进度条在 3/25 → 0.4 → 5/25 之间来回抽。用户报的就是这个。
+   */
+  const broadcast = (extra) => {
+    const p = batchProgress({ title: '正在切回原图', total: files.length, items: slots });
+    const t = pickTimings();
+    send('progress', {
+      stage: 'batch', pct: p.pct, message: p.title, rows: p.rows,
+      timings: t.timings, timingsTitle: t.title, timingsLive: t.live,
+      workers: concurrency, finished: p.finished, failed: p.failed, total: p.total,
+      ...extra,
+    });
+  };
 
   await Promise.all(files.map(async (f, i) => {
-    const label = `第 ${i + 1}/${files.length} 张画布`;
+    slots[i] = { ...slots[i], state: 'running', note: '正在读成片…' };
+    broadcast();
     try {
-      send('progress', {
-        stage: 'batch', pct: finishedFiles / files.length,
-        message: `${label} · 正在读成片…（${path.basename(f)}）`,
-        workers: concurrency, finished: finishedFiles, total: files.length,
-      });
       const found = findManifestFor(f);
       if (!found) throw new Error('找不到配套的 .manifest.json');
       const report = await splitCanvas({
@@ -594,11 +625,9 @@ ipcMain.handle('recover:splitMany', async (_e, payload) => {
         format: format || 'jpeg', quality: quality ?? 14, keepExif: keepExif !== false,
         limiter: gate,
         onProgress: (p) => {
-          send('progress', {
-            ...p,
-            message: `${label} · ${p.message}`,
-            workers: concurrency, finished: finishedFiles, total: files.length,
-          });
+          slots[i] = { ...slots[i], pct: p.pct ?? 0, state: 'running', note: p.message ?? '' };
+          liveTimings.set(i, p.timings ?? []);
+          broadcast();
         },
       });
       const lib = readLibrary();
@@ -611,16 +640,17 @@ ipcMain.handle('recover:splitMany', async (_e, payload) => {
         warnings: report.warnings,
         timings: report.timings,
       });
+      slots[i] = { ...slots[i], pct: 1, state: 'done', note: `${report.outputs.length} 张原图` };
+      liveTimings.delete(i);
+      lastDone = { index: i, timings: report.timings ?? [] };
     } catch (e) {
       failed.push({ index: i, file: f, name: path.basename(f), error: e.message });
+      slots[i] = { ...slots[i], pct: 1, state: 'failed', note: e.message };
+      liveTimings.delete(i);
     }
-    finishedFiles++;
-    send('progress', {
-      stage: 'batch', pct: finishedFiles / files.length,
-      message: `已切回 ${finishedFiles}/${files.length} 张画布`,
-      workers: concurrency, finished: finishedFiles, total: files.length,
-    });
+    broadcast();
   }));
+  broadcast({ pct: 1 });
 
   done.sort((a, b) => a.index - b.index);
   failed.sort((a, b) => a.index - b.index);

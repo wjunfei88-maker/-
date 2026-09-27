@@ -109,9 +109,25 @@ function fmtMs(ms) {
  * 所以时间必须花在哪一步就显示哪一步（这些数字是后端 onProgress 里带出来的实测值，不是估的）。
  */
 export function ProgressOverlay({ progress }) {
+  // 一列进度条要**自动跟着正在跑的那张滚** —— 8 张画布时框里放不下，
+  // 不滚的话用户看到的是前 5 张，正在动的挤在看不见的下半截。
+  const rowsEarly = progress?.rows ?? [];
+  const firstRunning = rowsEarly.findIndex((r) => r.state === 'running');
+  const boxRef = React.useRef(null);
+  React.useEffect(() => {
+    const box = boxRef.current;
+    if (!box || firstRunning < 0) return;
+    const el = box.children[firstRunning];
+    if (!el) return;
+    const top = el.offsetTop - box.offsetTop;
+    if (top < box.scrollTop || top + el.offsetHeight > box.scrollTop + box.clientHeight) {
+      box.scrollTop = Math.max(0, top - 6);
+    }
+  }, [firstRunning]);
   if (!progress) return null;
   const pct = Math.round((progress.pct ?? 0) * 100);
   const timings = progress.timings ?? [];
+  const rows = progress.rows ?? [];
   const slowest = timings.reduce((m, t) => (t.ms > (m?.ms ?? 0) ? t : m), null);
 
   return (
@@ -127,6 +143,24 @@ export function ProgressOverlay({ progress }) {
               {progress.total > 1 ? ` · 已完成 ${progress.finished ?? 0}/${progress.total}` : ''}</span>
           )}
         </div>
+
+        {/* 每一张画布自己一条进度条 —— 并行时只有一个总进度条看不出谁卡住了 */}
+        {rows.length > 1 && (
+          <div className="p-rows" ref={boxRef}>
+            {rows.map((r) => (
+              <div key={r.index} className={`p-row ${r.state}`}>
+                <span className="pr-label">{r.label}</span>
+                <div className="pr-body">
+                  <div className="pr-line">
+                    <span className="pr-track"><i style={{ width: `${Math.round(r.pct * 100)}%` }} /></span>
+                    <span className="pr-pct">{r.state === 'pending' ? '—' : `${Math.round(r.pct * 100)}%`}</span>
+                  </div>
+                  {r.note && <div className="pr-note">{r.note}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
 
         {timings.length > 0 && (
           <div className="p-timings">

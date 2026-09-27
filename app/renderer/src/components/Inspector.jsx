@@ -25,6 +25,7 @@ export default function Inspector(p) {
     rec, setRec, onRecover, onPickReturned, onPickOutDir, recoverDir, onResetOutDir,
     onScanExport, onClearLibrary, onOpenDir, lastRec, defaultRecoverDir, recoverSubdir,
     library, onForget, onReveal, onReuseBatch, sys, onSetJobs,
+    ledger, price, onSetPrice,
   } = p;
 
   // 用户以前手选过一个自定义目录时，「默认」和「当前」就不一样了 —— 必须显眼地说出来
@@ -397,7 +398,7 @@ export default function Inspector(p) {
         </div>
       </div>
 
-      {/* ── 历史批次 ── */}
+      {/* ── 历史批次 + 省额度账本 ── */}
       {library.batches?.length > 0 && (
         <>
           <div className="section-head">
@@ -405,6 +406,33 @@ export default function Inspector(p) {
             <span className="count-pill">{library.batches.length}</span>
             <button className="link-btn right" onClick={onClearLibrary}>一键清空</button>
           </div>
+          {ledger && ledger.saved > 0 && (
+            <div className="insp-group">
+              <div className="ledger-card">
+                <div className="lg-main">
+                  <b>¥{ledger.money.toFixed(2)}</b>
+                  <span>省了 <b>{ledger.saved}</b> 次额度</span>
+                </div>
+                <div className="hint">
+                  {ledger.photos} 张照片拼成 <b>{ledger.canvases}</b> 张画布。
+                  不拼的话像素蛋糕要扣 <b>{ledger.photos}</b> 次。
+                </div>
+                <div className="lg-price">
+                  <span>像素蛋糕套餐</span>
+                  <input className="minput" type="number" min="1" step="1" value={price.planPrice}
+                    onChange={(e) => onSetPrice({ planPrice: Number(e.target.value) })} />
+                  <span>元 /</span>
+                  <input className="minput" type="number" min="1" step="1" value={price.planSheets}
+                    onChange={(e) => onSetPrice({ planSheets: Number(e.target.value) })} />
+                  <span>张</span>
+                </div>
+                <div className="lg-price-sub">单张 ¥{ledger.unitPrice.toFixed(3)} —— 改了上面的价，省下的钱当场重算</div>
+                <div className="hint">
+                  每张画布只算一次额度。<b>哪一次是白做的测试，就把那一条 ✕ 掉</b>，省下的次数会跟着扣掉。
+                </div>
+              </div>
+            </div>
+          )}
           <div className="insp-group" style={{ paddingBottom: 20 }}>
             {library.batches.slice(0, 12).map((b) => (
               <div className="batch" key={b.id}>
@@ -413,11 +441,14 @@ export default function Inspector(p) {
                   : <div style={{ width: 44, height: 32, borderRadius: 5, background: '#2a2a2e' }} />}
                 <div className="batch-meta">
                   <div className="batch-name">{b.name}</div>
-                  <div className="batch-sub">{b.canvas.width}×{b.canvas.height} · {b.count}张</div>
+                  <div className="batch-sub">
+                    {b.canvas.width}×{b.canvas.height} · {b.count}张
+                    {b.count > 1 && <em className="lg-saved">省 {b.count - 1} 次</em>}
+                  </div>
                 </div>
                 <button className="btn ghost sm" onClick={() => onReuseBatch(b)} title="载入这一批做切分">用</button>
                 <button className="btn ghost sm icon" onClick={() => onReveal(b.canvasFile)} title="在访达中显示">↗</button>
-                <button className="btn danger-ghost sm icon" onClick={() => onForget(b.id)} title="移除记录">✕</button>
+                <button className="btn danger-ghost sm icon" onClick={() => onForget(b.id)} title="移除这条记录（这一次省下的额度也会从账上扣掉）">✕</button>
               </div>
             ))}
           </div>

@@ -17,6 +17,7 @@ import {
   EXPORT_SUBDIR as SETTINGS_SUBDIR, RECOVER_SUBDIR,
   normalizeSettings, cleanPatch, exportDirOf, recoverDirOf,
 } from './services/settings.mjs';
+import { summarizeLedger } from './services/ledger.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const DEV_URL = process.env.VITE_DEV_SERVER_URL;
@@ -71,10 +72,16 @@ function writeSettings(patch = {}) {
 }
 
 /** 界面要的那一份：设置 + 算好的两个目录 + 两个并发推导 */
+/** 省额度账本：每条历史批次 = 一张画布 = 一次扣费，省下的次数在这里折成钱。 */
+function ledgerView() {
+  return summarizeLedger(readLibrary().batches, readSettings());
+}
+
 function settingsView() {
   const settings = readSettings();
   return {
     settings,
+    ledger: ledgerView(),
     exportDir: exportDirOf(settings),
     recoverDir: recoverDirOf(settings),
     // 「默认」和「当前」要分开报给界面：用户曾经手选过一个自定义目录时，
@@ -471,18 +478,22 @@ ipcMain.handle('recover:split', async (_e, payload) => {
   return report;
 });
 
-ipcMain.handle('library:list', () => readLibrary());
+ipcMain.handle('library:list', () => {
+  const lib = readLibrary();
+  return { ...lib, ledger: ledgerView() };
+});
 ipcMain.handle('library:forget', (_e, id) => {
   const lib = readLibrary();
   lib.batches = lib.batches.filter((b) => b.id !== id);
   writeLibrary(lib);
-  return lib;
+  // 移除一条批次 = 把这一次省下的额度也从账上扣掉（用户"这批只是测试"的诉求）
+  return { ...lib, ledger: ledgerView() };
 });
 
 /** 一键清空历史批次。只动 library.json，不删用户磁盘上的成片。 */
 ipcMain.handle('library:clear', () => {
   writeLibrary({ batches: [] });
-  return { batches: [] };
+  return { batches: [], ledger: ledgerView() };
 });
 
 /**

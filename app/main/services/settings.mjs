@@ -25,6 +25,9 @@ export function defaultSettings(pictures) {
     // 0 = 自动（按机器配置推荐）；>0 = 用户手选的并发数
     exportJobs: 0,
     splitJobs: 0,
+    // 像素蛋糕的套餐价：默认 299 元 / 800 张 —— 用来把"省下的次数"折算成钱
+    planPrice: 299,
+    planSheets: 800,
   };
 }
 
@@ -45,7 +48,16 @@ export function normalizeSettings(raw, { pictures, exists }) {
 
   s.exportJobs = clampJobs(s.exportJobs);
   s.splitJobs = clampJobs(s.splitJobs);
+  s.planPrice = clampMoney(s.planPrice, def.planPrice);
+  s.planSheets = clampMoney(s.planSheets, def.planSheets);
   return s;
+}
+
+/** 套餐价/张数：只接受正数，脏值一律退回默认（除零会让「省了多少钱」变成 Infinity） */
+function clampMoney(v, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return n;
 }
 
 /** 并发数只接受非负整数（0 = 自动）。乱七八糟的值一律当自动。 */
@@ -63,6 +75,8 @@ export function cleanPatch(patch = {}) {
   if (typeof p.recoverDir === 'string' && p.recoverDir) clean.recoverDir = p.recoverDir;
   if (Number.isFinite(p.exportJobs)) clean.exportJobs = clampJobs(p.exportJobs);
   if (Number.isFinite(p.splitJobs)) clean.splitJobs = clampJobs(p.splitJobs);
+  if (Number.isFinite(p.planPrice)) clean.planPrice = clampMoney(p.planPrice, 299);
+  if (Number.isFinite(p.planSheets)) clean.planSheets = clampMoney(p.planSheets, 800);
   return clean;
 }
 
@@ -80,4 +94,11 @@ export function exportDirOf(settings) {
 export function recoverDirOf(settings) {
   if (settings?.recoverDir) return settings.recoverDir;
   return path.join(settings.exportParent, RECOVER_SUBDIR);
+}
+
+/** 单张均价（元）。套餐价 ÷ 张数；默认 299 / 800 = 0.37375 元/张。 */
+export function unitPriceOf(settings) {
+  const price = clampMoney(settings?.planPrice, 299);
+  const sheets = clampMoney(settings?.planSheets, 800);
+  return price / sheets;
 }

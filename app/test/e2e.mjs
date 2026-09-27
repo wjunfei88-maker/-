@@ -19,7 +19,8 @@ import { probeImage } from '../main/services/library.mjs';
 import { findManifestFor, planRecover, scanDirForCanvases } from '../main/services/recover.mjs';
 import { pruneSession, sessionPayload } from '../main/services/session.mjs';
 import { exportConcurrency, splitConcurrency, splitPlan, createLimiter, mapLimit, delay, exportJobMB } from '../main/services/pool.mjs';
-import { EXPORT_SUBDIR, RECOVER_SUBDIR, normalizeSettings, cleanPatch, exportDirOf, recoverDirOf } from '../main/services/settings.mjs';
+import { EXPORT_SUBDIR, RECOVER_SUBDIR, normalizeSettings, cleanPatch, exportDirOf, recoverDirOf, unitPriceOf } from '../main/services/settings.mjs';
+import { summarizeLedger, savedOf } from '../main/services/ledger.mjs';
 import { renderCanvas, makeBaseName } from '../main/services/export.mjs';
 import {
   findFreeSpot, snapPosition, tightBounds, validateCanvas, tooClose, asRect, overlaps,
@@ -845,6 +846,36 @@ H('⑬ 导出位置：自动建「像素拼图导出」子文件夹 + 用户选�
 }
 
 // ─────────────────────── 结果 ───────────────────────
+H('⑭ 省额度账本：这里算的是钱，错一次用户就照着错数字决定要不要拼');
+
+const price = { planPrice: 299, planSheets: 800 };
+ok('单张均价 = 299 / 800', unitPriceOf(price).toFixed(5) === '0.37375', unitPriceOf(price));
+ok('套餐价脏值退回默认（除零会让钱变成 Infinity）',
+  unitPriceOf({ planPrice: 0, planSheets: 0 }).toFixed(5) === '0.37375' && unitPriceOf({ planPrice: 'x' }).toFixed(5) === '0.37375');
+
+ok('一张画布拼 4 张 → 省 3 次', savedOf({ count: 4 }) === 3, savedOf({ count: 4 }));
+ok('一张画布只放 1 张 → 不省也不亏', savedOf({ count: 1 }) === 0);
+ok('脏数据不产出负数节省', savedOf({ count: 0 }) === 0 && savedOf({}) === 0 && savedOf({ count: -5 }) === 0);
+
+// 用户真实那批：25 张 → 6 张画布
+const realLedger = summarizeLedger(
+  [{ count: 4, bytes: 100 }, { count: 3, bytes: 200 }, { count: 5 }, { count: 2 }, { count: 8 }, { count: 3 }],
+  price);
+ok('25 张拼成 6 张画布 → 省 19 次',
+  realLedger.photos === 25 && realLedger.canvases === 6 && realLedger.saved === 19,
+  `photos=${realLedger.photos} canvases=${realLedger.canvases} saved=${realLedger.saved}`);
+ok('省下的钱 = 次数 × 单价', Math.abs(realLedger.money - 19 * (299 / 800)) < 1e-9, realLedger.money.toFixed(4));
+ok('字节数也累加', realLedger.bytes === 300);
+
+// 逐条移除：用户"这批只是测试、没进像素蛋糕"的诉求就是靠这个
+const afterForget = summarizeLedger([{ count: 4 }, { count: 3 }], price);
+ok('移除一条批次 = 那一次省下的额度从账上扣掉',
+  afterForget.saved === 3 && summarizeLedger([{ count: 3 }], price).saved === 2,
+  `去掉了省 3 次的那条 → ${afterForget.saved}`);
+
+ok('一批都没有时不炸、也不显示负数',
+  summarizeLedger([], price).saved === 0 && summarizeLedger(null, price).money === 0);
+
 H('结果');
 console.log(`  通过 ${pass} 项，失败 ${fail} 项`);
 console.log(`  测试产物：${TMP}\n`);

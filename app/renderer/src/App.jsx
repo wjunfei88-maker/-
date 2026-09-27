@@ -541,6 +541,14 @@ export default function App() {
   const setJobs = useCallback(async (kind, n) => {
     const r = await pc.setSettings(kind === 'export' ? { exportJobs: n } : { splitJobs: n });
     setSys(r.plan);
+    if (r.ledger) setLibrary((v) => ({ ...v, ledger: r.ledger }));
+  }, []);
+
+  /** 像素蛋糕的套餐价（默认 299 元 / 800 张）—— 改完账本当场重算 */
+  const setPrice = useCallback(async (patch) => {
+    const r = await pc.setSettings(patch);
+    if (r.ledger) setLibrary((v) => ({ ...v, ledger: r.ledger }));
+    if (r.settings) setSys((v) => (v ? { ...v, settings: r.settings } : v));
   }, []);
 
   /** 改导出位置：选的是**父目录**，软件在里面自动建「像素拼图导出」 */
@@ -658,6 +666,9 @@ export default function App() {
           defaultRecoverDir={paths.defaultRecoverDir}
           recoverSubdir={paths.recoverSubdir}
           onClearLibrary={clearLibrary}
+          onSetPrice={setPrice}
+          ledger={library.ledger}
+          price={{ planPrice: sys?.settings?.planPrice ?? 299, planSheets: sys?.settings?.planSheets ?? 800 }}
           library={library} onForget={forget} onReveal={pc.reveal} onReuseBatch={reuseBatch}
           sys={sys} onSetJobs={setJobs}
         />
@@ -666,6 +677,7 @@ export default function App() {
       <StatusBar
         images={images} items={items} canvas={canvas} hint={hint}
         problems={problems} busy={busy} message={message}
+        ledger={library.ledger}
       />
 
       <Toasts list={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />

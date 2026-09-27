@@ -43,7 +43,15 @@ export function TopBar({
   );
 }
 
-export function StatusBar({ images, items, canvas, hint, problems, busy, message }) {
+/** 账上的钱要短：¥15.7 / ¥1.5K —— 状态栏没地方放小数点后两位 */
+export function fmtMoney(n) {
+  const v = Number(n) || 0;
+  if (v >= 10000) return (v / 1000).toFixed(1) + 'K';
+  if (v >= 1000) return (v / 1000).toFixed(2) + 'K';
+  return v.toFixed(2);
+}
+
+export function StatusBar({ images, items, canvas, hint, problems, busy, message, ledger }) {
   const totalMP = items.reduce((s, i) => s + (i.width * i.height) / 1e6, 0);
   const over = canvas.width > 12000 || canvas.height > 12000;
   const dot = busy ? 'var(--accent)' : over || problems.length ? 'var(--danger)' : items.length ? 'var(--ok)' : 'var(--txt-3)';
@@ -54,6 +62,11 @@ export function StatusBar({ images, items, canvas, hint, problems, busy, message
       <span>底片 <b>{images.length}</b></span>
       <span>画布上 <b>{items.length}</b></span>
       <span>合计 <b>{totalMP.toFixed(1)}</b> MP</span>
+      {ledger?.saved > 0 && (
+        <span className="ledger-chip" title={`${ledger.photos} 张照片拼成 ${ledger.canvases} 张画布；不拼的话要扣 ${ledger.photos} 次额度`}>
+          已省 <b>{ledger.saved}</b> 次 · <b>¥{fmtMoney(ledger.money)}</b>
+        </span>
+      )}
       <span className="spacer" />
       {problems.length > 0 && (
         <span style={{ color: 'var(--danger)' }}>

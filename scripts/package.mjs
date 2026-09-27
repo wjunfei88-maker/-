@@ -134,15 +134,30 @@ if (!hasBinding || !hasVips) {
 }
 
 // 可选：顺带做一个 DMG（方便拖进「应用程序」）
+//
+// 给别的人用，DMG 里不能只放 .app —— 没做公证的 app 一打开就被 macOS 拦住，
+// 收件人只会看到「已损坏，移到废纸篓」。所以里面要同时放一份「使用说明.txt」
+// 和一个「应用程序」软链接，让「怎么装、怎么过这一关」跟 app 摆在一起。
 if (process.argv.includes('--dmg')) {
-  const dmg = path.join(OUT, `${NAME}.dmg`);
+  const dmg = path.join(OUT, `${NAME}-1.0.0.dmg`);
+  const stage = path.join(OUT, '.dmg-stage');
   fs.rmSync(dmg, { force: true });
+  fs.rmSync(stage, { recursive: true, force: true });
+  fs.mkdirSync(stage, { recursive: true });
   try {
-    execFileSync('hdiutil', ['create', '-volname', NAME, '-srcfolder', appPath,
+    // APFS 上用 clonefile 复制：305MB 的 app 是即时、不额外占盘
+    execFileSync('cp', ['-Rc', appPath, path.join(stage, `${NAME}.app`)], { stdio: 'pipe' });
+    const guide = path.join(ROOT, 'build/使用说明.txt');
+    if (fs.existsSync(guide)) fs.copyFileSync(guide, path.join(stage, '使用说明.txt'));
+    fs.symlinkSync('/Applications', path.join(stage, '应用程序'));
+    execFileSync('hdiutil', ['create', '-volname', NAME, '-srcfolder', stage,
       '-ov', '-format', 'UDZO', '-quiet', dmg], { stdio: 'pipe' });
     console.log(`\n✔ DMG：${path.relative(ROOT, dmg)}  (${mb(fs.statSync(dmg).size)})`);
+    console.log('  里面：像素拼图.app + 使用说明.txt + 「应用程序」快捷方式');
   } catch (e) {
     console.error('DMG 生成失败：' + e.message);
+  } finally {
+    fs.rmSync(stage, { recursive: true, force: true });
   }
 }
 

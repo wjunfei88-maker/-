@@ -14,7 +14,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import * as packagerMod from '@electron/packager';
 
 // 这个包只有具名导出，没有 default
@@ -131,6 +131,34 @@ console.log(`  libvips 动态库：${hasVips ? '✔ ' + nativeFiles.find((f) => 
 if (!hasBinding || !hasVips) {
   console.error('\n⚠️  原生模块没被正确解包，打包后的应用会启动失败。');
   process.exitCode = 2;
+}
+
+// ── 真正的代码签名（这一步决定「发给别人」能不能打开）─────────────────
+//
+// packager 装出来的 app 只有链接器自带的 ad-hoc 签名（flags=adhoc,linker-signed），
+// 而且 **Contents/_CodeSignature/ 根本不存在** —— 那个签名只盖住主可执行文件，
+// 一个资源都没盖。本机 Gatekeeper 关着，双击照样跑；
+// 但一旦经由微信 / AirDrop / 浏览器落到别人机器上（带上 com.apple.quarantine），
+// macOS 一验就是「**「像素拼图.app」已损坏，你应该将它移到废纸篓**」，
+// 而且「隐私与安全性」里**不会出现「仍要打开」按钮** —— 那不是策略拒绝，是签名无效。
+// 收件人只会以为文件坏了，然后来问你。
+//
+// 修法：打完包从里到外真签一遍（ad-hoc，拿 `-` 当身份）。签完 _CodeSignature 才会出现。
+const signApp = (target) => {
+  execFileSync('codesign', ['--force', '--deep', '--sign', '-', target], { stdio: 'pipe' });
+  const res = spawnSync('codesign', ['--verify', '--deep', '--strict', target], { encoding: 'utf8' });
+  return res.status === 0;
+};
+
+console.log('\n签名中（从里到外真签一遍）…');
+const signT0 = Date.now();
+const signOk = signApp(appPath);
+const hasRes = fs.existsSync(path.join(appPath, 'Contents/_CodeSignature/CodeResources'));
+console.log(`  签名：${signOk && hasRes ? '✔ 有效（_CodeSignature/CodeResources 已生成）' : '✘ 无效'}  用时 ${((Date.now() - signT0) / 1000).toFixed(1)}s`);
+if (!signOk || !hasRes) {
+  console.error('\n⚠️  签名无效 —— 这个 app 发到别人电脑上会被报「已损坏」。');
+  console.error('   先确认装了 Xcode 命令行工具：xcode-select --install');
+  process.exitCode = 3;
 }
 
 // 可选：顺带做一个 DMG（方便拖进「应用程序」）

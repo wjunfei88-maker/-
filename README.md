@@ -454,6 +454,37 @@ npm test
 
 ## 更新记录
 
+### v8
+
+0. **修掉一个能把整个交付毁掉的 bug：打包出来的 app 其实没有有效签名。**
+   起因是用户把 DMG 发给别人，对方双击后看到
+   **「"像素拼图.app"已损坏，你应该将它移到废纸篓」**，而且
+   「隐私与安全性」里**根本没有「仍要打开」那一行**。
+   一查：`@electron/packager` 装出来的 app 只有链接器自带的 ad-hoc 签名
+   （`flags=0x20002(adhoc,linker-signed)`），`Contents/_CodeSignature/` **压根不存在** ——
+   那个签名只盖住主可执行文件，**一个资源都没盖**。
+   `codesign --verify --strict` 会直说：
+   `code has no resources but signature indicates they must be present`。
+
+   为什么一直没发现：**开发机上 Gatekeeper 是关着的**（"任何来源"），带病也能跑，
+   `npm test` 全绿、`npm run build` 全绿 —— 只有落到别人机器上才现形。
+   而微信/AirDrop/浏览器下载会盖一个 `com.apple.quarantine`，macOS 一验就拒绝，
+   报的还偏偏是"已损坏"这种最吓人的说法，且不给「仍要打开」的补救入口
+   （**那不是策略拒绝，是签名无效** —— 系统不给你"仍然相信它"的机会）。
+
+   修法：`scripts/package.mjs` 打包后**从里到外真签一遍**
+   （`codesign --force --deep --sign -`），并立刻用
+   `codesign --verify --deep --strict` 自检，**不通过就 exit 3**。
+   签完才生成 `_CodeSignature/CodeResources`。
+   实测：签名前 `code has no resources…` → 签名后 `valid on disk / satisfies its
+   Designated Requirement`；把 app 复制出来盖上模拟的微信检疫标志再验，**依然有效**，
+   且 sharp 原生模块照常工作。
+   教训写进了 `AGENTS.md` 第六节：「打包后必须确认签名那一行是 ✔，否则别把 DMG 发出去。」
+
+1. **DMG 里不再只有 .app**：同时放 `build/使用说明.txt`（怎么装、怎么过 Gatekeeper
+   那一关、隐私说明）和一个指向 `/Applications` 的软链接，DMG 名字带上版本号。
+   收件人双击被拦时，手边就有解释 —— 而不是来找你。
+
 ### v7
 
 0. 进度浮层改版（用户报的「张数会跳来跳去」）。改之前：并行导出时「第 N 张画布」跟着

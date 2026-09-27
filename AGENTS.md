@@ -125,7 +125,46 @@ Electron + React 桌面应用。把一堆照片 1:1 无损拼成几张画布，�
 
 ---
 
-## 六、每次改完的固定动作
+## 六、打包发给别人：一个**把整个交付毁掉**的坑
+
+**`@electron/packager` 装出来的 app 是没有真正签名的。** 只有链接器自带的
+`flags=0x20002(adhoc,linker-signed)`，而且 **`Contents/_CodeSignature/` 根本不存在** ——
+那个签名只盖住主可执行文件，**一个资源都没盖**。
+
+后果分两种机器：
+
+- **开发机**：Gatekeeper 关着（用户选了"任何来源"），双击照样跑，`npm test` 全绿，
+  你**完全看不出有问题**。
+- **别人的机器**：微信 / AirDrop / 浏览器下载会盖一个 `com.apple.quarantine`，
+  macOS 一验签名就报 **「"像素拼图.app"已损坏，你应该将它移到废纸篓」**，
+  而且**「隐私与安全性」里不会出现「仍要打开」按钮** —— 那不是策略拒绝，是签名无效。
+  收件人以为文件坏了，你也一头雾水。
+
+**怎么认出来**（两个都要看）：
+
+```bash
+codesign --verify --strict "release/像素拼图-darwin-arm64/像素拼图.app"
+#   坏的：code has no resources but signature indicates they must be present
+ls "release/像素拼图-darwin-arm64/像素拼图.app/Contents/_CodeSignature/"
+#   坏的：No such file or directory
+```
+
+**修法**：打包后从里到外真签一遍（ad-hoc，拿 `-` 当身份）。
+
+```bash
+codesign --force --deep --sign - "……/像素拼图.app"
+```
+
+`scripts/package.mjs` 已经在打包后自动做这件事，**并且验证失败会 exit 3** ——
+不要把那一步删掉。改完打包脚本，务必确认输出里有
+`签名：✔ 有效（_CodeSignature/CodeResources 已生成）`。
+
+顺带记牢：**发给别人的 DMG 里不能只放 .app**。要同时放 `build/使用说明.txt`
+（写清怎么过 Gatekeeper 那一关）和一个指向 `/Applications` 的软链接。
+
+---
+
+## 七、每次改完的固定动作
 
 ```bash
 npm test                      # 必须 N 项全绿
@@ -136,5 +175,7 @@ node --check app/main/main.mjs   # 主进程（测试第 ⑯ 节也会查）
 然后：提交 → `git push origin main` → `git push backup main` →
 **核对三处 SHA 一致**（本地 / GitHub / 备份裸仓库）→ 重新打包
 （`ELECTRON_MIRROR=... node scripts/package.mjs --dmg`）→ 清理 `/tmp` 夹具。
+
+重新打包后**必须确认签名那一行是 ✔**（见上一节）。否则别把 DMG 发出去。
 
 改完之后要主动告诉用户：**`/Applications/像素拼图.app` 还是老版本，要手动覆盖。**

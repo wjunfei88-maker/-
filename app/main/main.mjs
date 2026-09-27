@@ -573,10 +573,15 @@ ipcMain.handle('recover:splitMany', async (_e, payload) => {
   const settings = readSettings();
   const dest = outDir || recoverDirOf(settings);
 
-  // 一个**全局**闸门管住所有画布的所有刀，而不是每张画布各管各的：
-  // 画布有的 4 刀有的 2 刀，按文件加锁会在小画布上跑不满 CPU。
+  // 两层闸门，各管一件事：
+  //   · gate 管住"同时在切几刀" —— 画布有的 4 刀有的 2 刀，按文件加锁会在小画布上
+  //     跑不满 CPU，所以**真正的吞吐**由它决定。
+  //   · fileGate 管住"同时在处理几张画布" —— 它不提高吞吐，只为了让浮层上的
+  //     "正在并行 N 张"和那一列进度条是**真话**。旧代码一上来就把 32 张全标成
+  //     running，其实只有 10 张在跑，用户看图以为"并行数没应用上"。
   const concurrency = splitPlan(settings.splitJobs).workers;
   const gate = createLimiter(concurrency);
+  const fileGate = createLimiter(concurrency);
 
   const done = [];
   const failed = [];
@@ -614,7 +619,7 @@ ipcMain.handle('recover:splitMany', async (_e, payload) => {
     });
   };
 
-  await Promise.all(files.map(async (f, i) => {
+  await Promise.all(files.map((f, i) => fileGate.run(async () => {
     slots[i] = { ...slots[i], state: 'running', note: '正在读成片…' };
     broadcast();
     try {
@@ -649,7 +654,7 @@ ipcMain.handle('recover:splitMany', async (_e, payload) => {
       liveTimings.delete(i);
     }
     broadcast();
-  }));
+  })));
   broadcast({ pct: 1 });
 
   done.sort((a, b) => a.index - b.index);

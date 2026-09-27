@@ -528,6 +528,9 @@ input { user-select: text; }
   display: block; height: 100%; border-radius: 99px;
   background: var(--accent); transition: width 170ms cubic-bezier(.32, .72, 0, 1);
 }
+/* 正在跑但还没报进度的行（挂在闸门前面读成片那一下）也得看得见 ——
+   宽度 0 的香槟金条等于没有，整列会看着像"卡住了没动静"。 */
+.p-row.running .pr-track > i { min-width: 5px; }
 .pr-pct {
   width: 36px; text-align: right; font-size: 11px; color: var(--txt-2);
   font-variant-numeric: tabular-nums;

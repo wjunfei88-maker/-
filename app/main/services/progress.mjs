@@ -40,17 +40,21 @@ export function batchProgress({ title = '处理中', total, items = [] } = {}) {
 
   for (let i = 0; i < n; i++) {
     const it = src[i] && typeof src[i] === 'object' ? src[i] : {};
-    const state = TERMINAL.has(it.state) ? it.state : null;
-    const pct = state ? 1 : clampPiece(it.pct);
+    // 显式说自己在跑就得信它，**不能因为 pct 还是 0 就被降级成"等待中"**。
+    // 踩过的坑：切回那边一张画布挂在闸门前面读成片时 pct 就是 0，
+    // 结果界面上 10 路并行看起来像一路一路排队（用户报的"没应用到并行数"）。
+    const raw = it.state === 'running' ? 'running' : (TERMINAL.has(it.state) ? it.state : null);
+    const pct = raw === 'done' || raw === 'failed' ? 1 : clampPiece(it.pct);
+    const state = raw ?? (pct > 0 ? 'running' : 'pending');
     if (state === 'done') settled++;
     else if (state === 'failed') { settled++; failed++; }
-    else { sum += pct; if (pct > 0) running++; }
+    else { sum += pct; if (state === 'running') running++; }
 
     rows.push({
       index: i,
       label: typeof it.label === 'string' && it.label ? it.label : `第 ${i + 1} 张`,
       pct,
-      state: state ?? (pct > 0 ? 'running' : 'pending'),
+      state,
       note: typeof it.note === 'string' ? it.note : '',
     });
   }

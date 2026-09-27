@@ -7,6 +7,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import sharp from 'sharp';
 import exifReader from 'exif-reader';
@@ -916,6 +917,22 @@ const withFail = prog({ total: 2, items: [{ state: 'failed', note: '找不到配
 ok(withFail.rows[0].pct === 1 && withFail.rows[0].state === 'failed', '失败的那行满格 + 标失败');
 ok(withFail.failed === 1 && withFail.finished === 1, '失败也算"处理完了"，否则总进度永远到不了头');
 
+// 用户报的 bug ③：切回时明明 10 路并行，界面上却像一路一路排队。
+// 根因是这里 —— 一张画布挂在闸门前面读成片时 pct 还是 0，
+// 显式的 running 被降级成了 pending。
+const lane = prog({ total: 3, items: [{ state: 'done' }, { state: 'running', pct: 0 }, { state: 'running', pct: 0.5 }] });
+ok(lane.rows[1].state === 'running' && lane.rows[2].state === 'running' && lane.rows[0].state === 'done',
+  '说自己在跑的行不许因为 pct=0 被降级成"等待中"', lane.rows.map((r) => r.state).join());
+ok(lane.rows[2].state !== 'pending', '正在跑的行必须看得出来是在跑');
+ok(lane.title.includes('正在并行 2 张'), '标题里的并行张数要如实报', lane.title);
+// 1 张落盘 + 1 张跑到一半 + 1 张还在读 = (1 + 0.5 + 0)/3，那张 pct=0 的不许凑数
+ok(Math.abs(lane.pct - 0.5) < 1e-9, 'pct=0 的行不能给整批进度凑数', `${(lane.pct * 100).toFixed(1)}%`);
+ok(prog({ total: 2, items: [{ state: 'running', pct: 0 }, { state: 'running', pct: 0 }] }).pct === 0,
+  '全都还在读成片时整批进度是 0，不许凭空涨');
+// 真·等待中（没说自己跑、也没有进度）仍然要是 pending
+const idle = prog({ total: 3, items: [{ state: 'running', pct: 0 }, { state: 'pending' }, { pct: 0 }] }).rows;
+ok(idle[1].state === 'pending' && idle[2].state === 'pending', '没开始的行还是"等待中"');
+
 // 张数对不上时补齐：items 少了也要有 N 行，不能少一行
 ok(prog({ total: 4, items: [{ state: 'done' }] }).rows.length === 4, 'items 缺的按"等待中"补足');
 
@@ -926,6 +943,39 @@ const zero = batchProgress({});
 ok(zero.pct >= 0 && zero.pct <= 1 && Number.isFinite(zero.pct), '空输入不产出 NaN', zero.pct);
 ok(prog({ total: 1, items: [{ pct: 2 }] }).pct < 1, '单张内部进度给了 2 也只算 0.99');
 ok(prog({ total: 1, items: [{ pct: -5 }] }).pct === 0, '负进度当 0，不能变成负数进度条');
+
+H('⑯ 主进程文件能解析（这类错没有 build 兜着，会直接让 App 起不来）');
+
+// 为什么值得一条测试：渲染层有 vite build 兜着，主进程**没有**。
+// 一次改 main.mjs 少写一个括号，npm test 全绿、build 全绿，App 却一启动就死 ——
+// 只能靠人肉去点才发现。这里用 node --check 把这类错挡在提交之前。
+const mainFiles = [
+  'app/main/main.mjs',
+  'app/main/preload.cjs',
+  'app/main/services/export.mjs',
+  'app/main/services/exif.mjs',
+  'app/main/services/layout.mjs',
+  'app/main/services/ledger.mjs',
+  'app/main/services/pool.mjs',
+  'app/main/services/progress.mjs',
+  'app/main/services/recover.mjs',
+  'app/main/services/render.mjs',
+  'app/main/services/session.mjs',
+  'app/main/services/settings.mjs',
+  'app/main/services/split.mjs',
+  'app/main/workers/export-worker.mjs',
+];
+for (const f of mainFiles) {
+  let okFile = true;
+  let msg = '';
+  try {
+    execFileSync(process.execPath, ['--check', f], { stdio: 'pipe' });
+  } catch (e) {
+    okFile = false;
+    msg = String(e.stderr || e.message).split('\n').filter(Boolean)[0] ?? '解析失败';
+  }
+  ok(okFile, `${f} 能被 Node 解析`, okFile ? 'OK' : msg);
+}
 
 H('结果');
 console.log(`  通过 ${pass} 项，失败 ${fail} 项`);

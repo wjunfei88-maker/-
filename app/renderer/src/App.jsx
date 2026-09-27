@@ -165,7 +165,7 @@ export default function App() {
   const loadReturned = useCallback(async (files) => {
     if (!files || !files.length) return;
     const p = await pc.recoverPlan(files);
-    setRec((v) => ({ ...v, files, plan: p }));
+    setRec((v) => ({ ...v, files, plan: p, source: 'manual' }));
     const bad = p.total - p.okCount;
     if (!p.okCount) {
       toast('没找到合成记录', '选中的文件旁边要有导出时生成的 .manifest.json', 'err', 9000);
@@ -469,23 +469,6 @@ export default function App() {
    * 用户的原话：「切回原图应该自带的有默认的路径呀和导出的一样才对呀，
    * 特殊情况额外才需要自己选图片进行切回」。
    */
-  const scanExport = useCallback(async () => {
-    setBusy(true); setMessage('正在扫导出目录…');
-    try {
-      const r = await pc.scanExportDir();
-      if (!r?.okCount) {
-        toast('导出目录里没找到成片',
-          `扫的是 ${r?.dir || '导出目录'}。要么还没导出，要么像素蛋糕把文件存到别处了 —— 那种情况用「选文件（多选）」。`,
-          'err', 10000);
-        setMessage('');
-        return;
-      }
-      await loadReturned(r.rows.filter((x) => x.ok).map((x) => x.file));
-      setMessage(`扫到 ${r.okCount} 张画布`);
-    } catch (e) {
-      toast('扫描失败', e.message, 'err');
-    } finally { setBusy(false); setProgress(null); }
-  }, [loadReturned, toast]);
 
   const clearLibrary = useCallback(async () => {
     if (!library?.batches?.length) return;
@@ -499,8 +482,8 @@ export default function App() {
   /** 打开一个目录 —— 「我的文件去哪了」最可靠的答案就是直接把访达打开给他看 */
   const openDir = useCallback((p) => { if (p) pc.openPath(p); }, []);
 
-  const recover = useCallback(async () => {
-    const files = (rec.plan?.rows ?? []).filter((r) => r.ok).map((r) => r.file);
+  const recover = useCallback(async (filesArg) => {
+    const files = filesArg ?? (rec.plan?.rows ?? []).filter((r) => r.ok).map((r) => r.file);
     if (!files.length) return;
     setBusy(true); setMessage(`正在切回 ${files.length} 张画布…`);
     try {
@@ -520,6 +503,31 @@ export default function App() {
       toast('切分失败', e.message, 'err');
     } finally { setBusy(false); setProgress(null); }
   }, [rec, toast]);
+
+  /**
+   * 一键切回：扫默认导出目录 → 找到就直接切，不要在「扫」和「切」之间再让用户点一次。
+   * （之前是两步：一个叫「扫码切回」的按钮其实只配对不切，名字骗人 —— 用户真的被绕进去了。）
+   */
+  const scanAndRecover = useCallback(async () => {
+    setBusy(true); setMessage('正在扫导出目录…');
+    try {
+      const r = await pc.scanExportDir();
+      const files = (r?.rows ?? []).filter((x) => x.ok).map((x) => x.file);
+      if (!files.length) {
+        toast('导出目录里没找到成片',
+          `扫的是 ${r?.dir || '导出目录'}。要么还没导出，要么像素蛋糕把文件存到别处了 —— 那种情况用下面的「手动选」。`,
+          'err', 10000);
+        setMessage('');
+        return;
+      }
+      const p = await pc.recoverPlan(files);
+      setRec((v) => ({ ...v, files, plan: p, source: 'scan' }));
+      setBusy(false);                 // 交给 recover 自己接管进度
+      await recover(files);
+    } catch (e) {
+      toast('切回失败', e.message, 'err');
+    } finally { setBusy(false); setProgress(null); }
+  }, [recover, toast]);
 
   /** 从历史批次点进来：直接开文件选择 —— manifest 会自动按文件名配上，不用手动指 */
   const reuseBatch = useCallback(async (b) => {
@@ -644,7 +652,7 @@ export default function App() {
           recoverDir={rec.outDir}
           onPickOutDir={async () => { const d = await pc.pickFolder('选择切回原图的输出位置'); if (d) { setRec((v) => ({ ...v, outDir: d })); await pc.setSettings({ recoverDir: d }); } }}
           onResetOutDir={async () => { setRec((v) => ({ ...v, outDir: '' })); const st = await pc.setSettings({ recoverDir: '' }); if (st?.recoverDir) setRec((v) => ({ ...v, outDir: st.recoverDir })); }}
-          onScanExport={scanExport}
+          onScanExport={scanAndRecover}
           onOpenDir={openDir}
           lastRec={lastRec}
           defaultRecoverDir={paths.defaultRecoverDir}

@@ -302,7 +302,7 @@ export default function Inspector(p) {
         <div className="card">
           <button className="btn primary" style={{ width: '100%', justifyContent: 'center' }}
             onClick={onScanExport} disabled={busy}>
-            扫码切回（默认路径）
+            一键切回原图
           </button>
           <div className="alt-row">
             <button className="btn ghost sm" onClick={onPickReturned}>像素蛋糕存到别处了？手动选</button>
@@ -310,8 +310,9 @@ export default function Inspector(p) {
 
           {!rec.plan && (
             <div className="hint">
-              常规流程不用选文件：软件会去扫导出目录，自动把成片和 <b>.manifest.json</b> 配好对。<br />
-              只有换过目录、或分批导过的时候，才用下面那个「手动选」。
+              上面那个按钮会自己去扫导出目录（<span className="mono">{shortDir(defaultRecoverDir) || '默认位置'}</span>），
+              把成片和旁边的 <b>.manifest.json</b> 配好对，<b>然后直接切</b>。<br />
+              只有像素蛋糕把成片存到别处、或者你分批导过的时候，才用下面的「手动选」。
             </div>
           )}
 
@@ -320,7 +321,7 @@ export default function Inspector(p) {
               <div className={`hint ${rec.plan.okCount ? '' : 'warn'}`}
                 style={rec.plan.okCount ? { color: 'var(--ok)' } : undefined}>
                 {rec.plan.okCount
-                  ? <>已配对 <b>{rec.plan.okCount}</b> 张画布 · 共可切回 <b>{rec.plan.imageCount}</b> 张原图
+                  ? <>找到 <b>{rec.plan.okCount}</b> 张画布 · 可以切回 <b>{rec.plan.imageCount}</b> 张原图
                     {rec.plan.total > rec.plan.okCount ? `（${rec.plan.total - rec.plan.okCount} 个跳过）` : ''}</>
                   : '这些文件旁边都没找到 .manifest.json，无法确定切分位置。'}
               </div>
@@ -387,10 +388,12 @@ export default function Inspector(p) {
             <input type="checkbox" checked={rec.keepExif} onChange={(e) => setRec({ ...rec, keepExif: e.target.checked })} />
             把原图的 EXIF 搬回来（摘掉旧缩略图 + 朝向归一）
           </label>
-          <button className="btn primary" style={{ width: '100%', justifyContent: 'center', height: 32 }}
-            onClick={onRecover} disabled={busy || !(rec.plan?.okCount > 0)}>
-            {(rec.plan?.okCount ?? 0) > 1 ? `全部切回（${rec.plan.imageCount} 张原图）` : '切回原图'}
-          </button>
+          {rec.source === 'manual' && (rec.plan?.okCount ?? 0) > 0 && (
+            <button className="btn primary" style={{ width: '100%', justifyContent: 'center', height: 32 }}
+              onClick={() => onRecover()} disabled={busy}>
+              {(rec.plan?.okCount ?? 0) > 1 ? `全部切回（${rec.plan.imageCount} 张原图）` : '切回原图'}
+            </button>
+          )}
         </div>
       </div>
 

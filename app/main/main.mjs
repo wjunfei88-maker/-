@@ -18,6 +18,7 @@ import {
   normalizeSettings, cleanPatch, exportDirOf, recoverDirOf,
 } from './services/settings.mjs';
 import { summarizeLedger } from './services/ledger.mjs';
+import { batchProgress } from './services/progress.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const DEV_URL = process.env.VITE_DEV_SERVER_URL;
@@ -380,30 +381,48 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
 
   const done = [];
   const failed = [];
-  const active = new Map();   // index → 该画布内部的进度 0..1
+  const active = new Map();        // index → 该画布内部的进度 0..1
+  const liveTimings = new Map();   // index → 该画布当前的阶段耗时
+  let lastDone = null;             // { index, timings } 最近完成的那张
 
-  const broadcast = (extra, current) => {
+  /**
+   * 阶段耗时必须**钉住一张画布**显示。
+   * 并行时三张画布各报各的，早期版本每帧都跟着最后一条消息换 ——
+   * 结果上面的"第 N 张"和下面的阶段列表一起乱跳（用户报的"跳来跳去"就是这个）。
+   * 规则：有在跑的就取序号最小的那张；全在收尾了就显示最近完成的那张。
+   */
+  const pickTimings = () => {
+    const running = [...active.keys()].sort((a, b) => a - b);
+    if (running.length) {
+      const i = running[0];
+      return { title: `阶段耗时（第 ${i + 1} 张画布）`, timings: liveTimings.get(i) ?? [], live: true };
+    }
+    if (lastDone) return { title: `阶段耗时（第 ${lastDone.index + 1} 张，已完成）`, timings: lastDone.timings, live: false };
+    return { title: '', timings: [], live: false };
+  };
+
+  const broadcast = (extra) => {
     const finished = done.length + failed.length;
-    let sum = 0;
-    for (const v of active.values()) sum += v;
-    const pct = Math.min(1, (finished + sum) / jobs.length);
+    const running = [...active.keys()].sort((a, b) => a - b).map((i) => i + 1);
+    // 数字怎么算全部收在 progress.mjs 里（对着单测改，别在这里现推）
+    const p = batchProgress({ total: jobs.length, finished, active: [...active.values()], running });
+
+    const t = pickTimings();
     send('progress', {
-      stage: 'batch', pct,
-      message: current
-        ? `第 ${current.index + 1}/${jobs.length} 张画布 · ${current.progress.message}`
-        : `共 ${jobs.length} 张画布，已完成 ${finished} 张`,
-      timings: current?.progress.timings ?? [],
-      workers: plan.workers,
-      finished, total: jobs.length,
+      stage: 'batch', pct: p.pct, message: p.message,
+      timings: t.timings, timingsTitle: t.title, timingsLive: t.live,
+      workers: plan.workers, finished: p.finished, total: p.total, running,
       ...extra,
     });
   };
 
   const useWorkers = plan.workers > 1 && jobs.length > 1;
-  broadcast({ title: `并行 ${plan.workers} 个进程（${plan.reason}）` }, null);
+  broadcast({ title: `并行 ${plan.workers} 个进程（${plan.reason}）` });
 
   const finalize = (job, r) => {
     active.delete(job.index);
+    liveTimings.delete(job.index);
+    lastDone = { index: job.index, timings: r?.timings ?? [] };
     try {
       const entry = recordExport({ payload: job.payload, id: job.id, safe: job.safe, base: job.base, outDir, ...r });
       done.push({ index: job.index, ...entry });
@@ -421,7 +440,8 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
           panelConcurrency: perPanel,
           onProgress: (p) => {
             active.set(job.index, p.pct ?? 0);
-            broadcast({}, { index: job.index, progress: p });
+            liveTimings.set(job.index, p.timings ?? []);
+            broadcast({});
           },
         });
         finalize(job, r);
@@ -440,7 +460,8 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
           job, total: jobs.length,
           onProgress: ({ progress }) => {
             active.set(job.index, progress.pct ?? 0);
-            broadcast({}, { index: job.index, progress });
+            liveTimings.set(job.index, progress.timings ?? []);
+            broadcast({});
           },
         });
         if (r.ok) {
@@ -448,14 +469,14 @@ ipcMain.handle('export:composeAll', async (_e, payload) => {
           // 关键：finalize 之后必须再广播一次。
           // 否则"已完成 N/M"要等到下一张画布有进度时才更新 —— 最后一张永远追不上，
           // 浮层会一直停在旧数字上（实测 3 张并行时曾停在 0/3）。
-          broadcast({}, null);
-        } else { active.delete(job.index); failed.push({ index: job.index, error: r.error }); broadcast({}, null); }
+          broadcast({});
+        } else { active.delete(job.index); failed.push({ index: job.index, error: r.error }); broadcast({}); }
       }
     };
     await Promise.all(Array.from({ length: Math.min(plan.workers, jobs.length) }, worker));
   }
 
-  broadcast({ pct: 1 }, null);
+  broadcast({ pct: 1 });
   return { total: jobs.length, done, failed, workers: useWorkers ? plan.workers : 1, plan };
 });
 

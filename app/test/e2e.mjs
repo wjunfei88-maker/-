@@ -21,6 +21,7 @@ import { pruneSession, sessionPayload } from '../main/services/session.mjs';
 import { exportConcurrency, splitConcurrency, splitPlan, createLimiter, mapLimit, delay, exportJobMB } from '../main/services/pool.mjs';
 import { EXPORT_SUBDIR, RECOVER_SUBDIR, normalizeSettings, cleanPatch, exportDirOf, recoverDirOf, unitPriceOf } from '../main/services/settings.mjs';
 import { summarizeLedger, savedOf } from '../main/services/ledger.mjs';
+import { batchProgress } from '../main/services/progress.mjs';
 import { renderCanvas, makeBaseName } from '../main/services/export.mjs';
 import {
   findFreeSpot, snapPosition, tightBounds, validateCanvas, tooClose, asRect, overlaps,
@@ -875,6 +876,36 @@ ok('移除一条批次 = 那一次省下的额度从账上扣掉',
 
 ok('一批都没有时不炸、也不显示负数',
   summarizeLedger([], price).saved === 0 && summarizeLedger(null, price).money === 0);
+
+H('⑮ 批次进度：进度条不许先说"完事了"');
+
+// 用户报的真 bug：三张画布并行，进度条冲到 100% 而"已完成"还是 0/3
+const allInternal = batchProgress({ total: 3, finished: 0, active: [1, 1, 1], running: [1, 2, 3] });
+ok(allInternal.pct < 1, '三张内部都跑完但一张都没落盘 → 进度条不能是 100%', `${(allInternal.pct * 100).toFixed(1)}%`);
+ok(allInternal.pct > 0.9, '……但也不能显得还没干完', `${(allInternal.pct * 100).toFixed(1)}%`);
+ok(allInternal.finished === 0 && allInternal.message.includes('已完成 0/3'),
+  '"已完成"必须如实报 0', allInternal.message);
+
+ok(batchProgress({ total: 3, finished: 3, active: [], running: [] }).pct === 1,
+  '全部落盘了才是 100%');
+ok(batchProgress({ total: 3, finished: 3 }).message === '3 张画布全部完成');
+
+// 标题稳定性：同一批状态，无论 active 的插入顺序如何，文案必须一模一样
+const a = batchProgress({ total: 6, finished: 2, active: [0.5, 0.5, 0.5], running: [3, 4, 5] });
+const b = batchProgress({ total: 6, finished: 2, active: [0.5, 0.5, 0.5], running: [5, 3, 4] });
+ok(a.message === b.message, '标题不许跟着"哪一张刚发了消息"变', a.message);
+ok(a.message.includes('并行处理 3 张') && a.message.includes('已完成 2/6'), '并行时说清几张在跑', a.message);
+
+// 只剩一张在跑时说"第 N 张"，N 用真实序号
+const solo = batchProgress({ total: 6, finished: 2, active: [0.3], running: [1] });
+ok(solo.message.includes('第 1 张画布'), '只剩一张在跑就报它的序号', solo.message);
+
+// 脏输入不能把进度条搞成负数/超过 1/NaN
+const dirty = batchProgress({ total: 3, finished: 99, active: [-5, 'x', null], running: [] });
+ok(dirty.pct === 1 && dirty.finished === 3, 'finished 越界要被夹回 0..total', JSON.stringify(dirty));
+const zero = batchProgress({});
+ok(zero.pct >= 0 && zero.pct <= 1 && Number.isFinite(zero.pct), '空输入不产出 NaN', zero.pct);
+ok(batchProgress({ total: 3, finished: 0, active: [2] }).pct < 1, '单张内部进度给了 2 也只算 0.99');
 
 H('结果');
 console.log(`  通过 ${pass} 项，失败 ${fail} 项`);

@@ -130,15 +130,17 @@ export function ProgressOverlay({ progress }) {
 
         {timings.length > 0 && (
           <div className="p-timings">
+            {/* 标清楚这组耗时是哪一张画布的：并行时不能让人以为它是全局的 */}
+            {progress.timingsTitle && <div className="p-t-title">{progress.timingsTitle}</div>}
             {timings.map((t) => (
               <div key={t.label} className={`p-t${t === slowest ? ' slow' : ''}`}>
                 <span className="p-tl">{t.label}</span>
                 <span className="p-tm">{fmtMs(t.ms)}</span>
               </div>
             ))}
-            {/* 还没跑完时明确说一句"后面还有" ——
-                否则中途会把"目前最慢的一步"说成瓶颈，而真正吃时间的编码那步还没报上来 */}
-            {pct < 100 && (
+            {/* 只看这张画布自己跑完没有 —— 不能用全局 pct，否则最后一张还在编码，
+                这里却已经在说"最慢的一步"了 */}
+            {progress.timingsLive && (
               <div className="p-t running">
                 <span className="p-tl">进行中…</span>
                 <span className="p-tm">—</span>
@@ -146,7 +148,7 @@ export function ProgressOverlay({ progress }) {
             )}
             {slowest && timings.length > 1 && (
               <div className="p-note">
-                {pct < 100
+                {progress.timingsLive
                   ? `已完成的部分里，最慢的是「${slowest.label}」`
                   : `最慢的一步是「${slowest.label}」，占了大部分时间`}
               </div>

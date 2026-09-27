@@ -486,26 +486,44 @@ input { user-select: text; }
 .p-workers { font-size: 10.5px; color: var(--txt-3); letter-spacing: 0.01em; }
 
 /* 真实阶段耗时：哪一步花了多久，如实列出来 */
-/* ── 每一张画布自己一条进度条 ── */
+/* ── 每一张画布自己一条进度条 ──
+   不滚动、全部铺开：张数多就收紧行高，宁可密也不给滑块。
+   行高档位由 JS 按张数给（lg/md/sm/xs），和 Chrome.jsx 的 densityOf() 对应。 */
 .p-rows {
-  display: flex; flex-direction: column; gap: 8px;
+  display: flex; flex-direction: column;
   margin-top: 12px; padding-top: 11px;
   border-top: 1px solid var(--line);
-  /* 正好放满 5 行（每行 35px + 8px 间距）—— 让半行被切掉很难看，
-     8 张画布往后的靠 JS 自动滚到正在跑的那张 */
-  max-height: 207px; overflow-y: auto;
 }
+.p-rows.lg { gap: 8px; }
+.p-rows.md { gap: 5px; }
+.p-rows.sm { gap: 3px; }
+.p-rows.xs { gap: 2px; }
+
 .p-row { display: grid; grid-template-columns: 58px 1fr; gap: 9px; align-items: start; }
+.p-rows.md .p-row { grid-template-columns: 50px 1fr; gap: 7px; }
+.p-rows.sm .p-row, .p-rows.xs .p-row { grid-template-columns: 46px 1fr; gap: 6px; align-items: center; }
+
 .pr-label {
   font-size: 11px; color: var(--txt-3); padding-top: 1px;
   white-space: nowrap; font-variant-numeric: tabular-nums;
 }
+.p-rows.sm .pr-label, .p-rows.xs .pr-label { font-size: 10px; padding-top: 0; }
+.p-rows.xs .pr-label { font-size: 9px; }
+
 .pr-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.p-rows.md .pr-body, .p-rows.sm .pr-body, .p-rows.xs .pr-body { gap: 0; }
 .pr-line { display: flex; align-items: center; gap: 8px; }
+.p-rows.sm .pr-line, .p-rows.xs .pr-line { gap: 6px; }
+
 .pr-track {
   flex: 1; height: 4px; border-radius: 99px; overflow: hidden;
   background: rgba(0, 0, 0, .45);
 }
+.p-rows.md .pr-track { height: 5px; }
+.p-rows.sm .pr-track { height: 6px; }
+/* 行很密时把条加粗 —— 13px 的行高配 4px 的条会看不清 */
+.p-rows.xs .pr-track { height: 7px; }
+
 .pr-track > i {
   display: block; height: 100%; border-radius: 99px;
   background: var(--accent); transition: width 170ms cubic-bezier(.32, .72, 0, 1);
@@ -514,18 +532,26 @@ input { user-select: text; }
   width: 36px; text-align: right; font-size: 11px; color: var(--txt-2);
   font-variant-numeric: tabular-nums;
 }
+.p-rows.sm .pr-pct { width: 32px; font-size: 10px; }
+.p-rows.xs .pr-pct { width: 28px; font-size: 9px; }
+
 .pr-note {
   font-size: 10.5px; color: var(--txt-3);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.pr-note-inline {
+  flex: 0 1 34%; font-size: 10.5px; color: var(--txt-3); text-align: right;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
 /* 等待中：整行压暗，别跟正在跑的抢注意力 */
 .p-row.pending .pr-track > i { background: var(--txt-3); }
-.p-row.pending .pr-note, .p-row.pending .pr-pct { opacity: .55; }
+.p-row.pending .pr-note, .p-row.pending .pr-pct, .p-row.pending .pr-note-inline { opacity: .55; }
 /* 完成的转成成功色，失败的转危险色 —— 一眼看出哪张出事 */
 .p-row.done .pr-track > i { background: var(--ok); }
 .p-row.done .pr-label { color: var(--txt-2); }
 .p-row.failed .pr-track > i { background: var(--danger); }
-.p-row.failed .pr-note, .p-row.failed .pr-pct { color: var(--danger); }
+.p-row.failed .pr-note, .p-row.failed .pr-pct, .p-row.failed .pr-note-inline { color: var(--danger); }
 
 .p-t-title {
   font-size: 11px; color: var(--txt-3); margin-bottom: 2px;

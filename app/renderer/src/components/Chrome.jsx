@@ -97,38 +97,29 @@ export function Toasts({ list, onDismiss }) {
   );
 }
 
-/** 秒表格式：<1s 显示毫秒，>=1s 显示秒（一位小数） */
-function fmtMs(ms) {
-  if (!ms && ms !== 0) return '';
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
-}
-
 /**
  * 进度浮层。
- * 不只转圈：把**真实阶段耗时**列出来 —— 用户抱怨过"芯片跑不满、不知道慢在哪"，
- * 所以时间必须花在哪一步就显示哪一步（这些数字是后端 onProgress 里带出来的实测值，不是估的）。
+ *
+ * 每一张画布一条进度条，**全部铺开、不滚动** —— 用户点名要的：一眼看到整批的进度，
+ * 而不是"前 5 张 + 一个滑块"。张数多的时候自动收紧行高，让它始终铺得下。
+ *
+ * 这里曾经列过每一步的实测耗时（解码源图 / 保护带镜像 / 贴图 + LZW 压缩），
+ * 用户反馈用不到 —— 已删掉。要看性能看 README，别占着做图时的视线。
  */
+function densityOf(n) {
+  if (n <= 6) return 'lg';    // 宽松：说明文字换到第二行
+  if (n <= 12) return 'md';   // 适中：说明文字并到右边
+  if (n <= 24) return 'sm';   // 紧凑：只留序号 + 进度条 + 百分比
+  return 'xs';                // 很密：一屏铺满
+}
+
 export function ProgressOverlay({ progress }) {
-  // 一列进度条要**自动跟着正在跑的那张滚** —— 8 张画布时框里放不下，
-  // 不滚的话用户看到的是前 5 张，正在动的挤在看不见的下半截。
-  const rowsEarly = progress?.rows ?? [];
-  const firstRunning = rowsEarly.findIndex((r) => r.state === 'running');
-  const boxRef = React.useRef(null);
-  React.useEffect(() => {
-    const box = boxRef.current;
-    if (!box || firstRunning < 0) return;
-    const el = box.children[firstRunning];
-    if (!el) return;
-    const top = el.offsetTop - box.offsetTop;
-    if (top < box.scrollTop || top + el.offsetHeight > box.scrollTop + box.clientHeight) {
-      box.scrollTop = Math.max(0, top - 6);
-    }
-  }, [firstRunning]);
   if (!progress) return null;
   const pct = Math.round((progress.pct ?? 0) * 100);
-  const timings = progress.timings ?? [];
   const rows = progress.rows ?? [];
-  const slowest = timings.reduce((m, t) => (t.ms > (m?.ms ?? 0) ? t : m), null);
+  const density = densityOf(rows.length);
+  const stackNote = density === 'lg';          // 说明文字换行显示，还是并排
+  const showNote = density !== 'sm' && density !== 'xs';
 
   return (
     <div className="progress-overlay">
@@ -144,9 +135,8 @@ export function ProgressOverlay({ progress }) {
           )}
         </div>
 
-        {/* 每一张画布自己一条进度条 —— 并行时只有一个总进度条看不出谁卡住了 */}
         {rows.length > 1 && (
-          <div className="p-rows" ref={boxRef}>
+          <div className={`p-rows ${density}`}>
             {rows.map((r) => (
               <div key={r.index} className={`p-row ${r.state}`}>
                 <span className="pr-label">{r.label}</span>
@@ -154,39 +144,12 @@ export function ProgressOverlay({ progress }) {
                   <div className="pr-line">
                     <span className="pr-track"><i style={{ width: `${Math.round(r.pct * 100)}%` }} /></span>
                     <span className="pr-pct">{r.state === 'pending' ? '—' : `${Math.round(r.pct * 100)}%`}</span>
+                    {!stackNote && showNote && r.note && <span className="pr-note-inline">{r.note}</span>}
                   </div>
-                  {r.note && <div className="pr-note">{r.note}</div>}
+                  {stackNote && r.note && <div className="pr-note">{r.note}</div>}
                 </div>
               </div>
             ))}
-          </div>
-        )}
-
-        {timings.length > 0 && (
-          <div className="p-timings">
-            {/* 标清楚这组耗时是哪一张画布的：并行时不能让人以为它是全局的 */}
-            {progress.timingsTitle && <div className="p-t-title">{progress.timingsTitle}</div>}
-            {timings.map((t) => (
-              <div key={t.label} className={`p-t${t === slowest ? ' slow' : ''}`}>
-                <span className="p-tl">{t.label}</span>
-                <span className="p-tm">{fmtMs(t.ms)}</span>
-              </div>
-            ))}
-            {/* 只看这张画布自己跑完没有 —— 不能用全局 pct，否则最后一张还在编码，
-                这里却已经在说"最慢的一步"了 */}
-            {progress.timingsLive && (
-              <div className="p-t running">
-                <span className="p-tl">进行中…</span>
-                <span className="p-tm">—</span>
-              </div>
-            )}
-            {slowest && timings.length > 1 && (
-              <div className="p-note">
-                {progress.timingsLive
-                  ? `已完成的部分里，最慢的是「${slowest.label}」`
-                  : `最慢的一步是「${slowest.label}」，占了大部分时间`}
-              </div>
-            )}
           </div>
         )}
       </div>
